@@ -64,12 +64,13 @@ docker-compose ps
 1. Open the **Web Dashboard** at http://localhost:8080
 2. Go to **Settings** and configure:
 
-    *ISE Connection — hostname, credentials, API port
-    *ACME / DigiCert — directory URL, KID, HMAC key
-    *Certificate — common name, SANs, mode (shared/per-node)
-    *DNS Provider — Cloudflare, Route53, or Azure credentials
-    *Notifications — SMTP settings and recipients
-    *Scheduler — enable and set the daily run time
+    * ISE Connection — hostname, credentials, API port
+    * ACME / DigiCert — directory URL, KID, HMAC key
+    * Certificate — common name, SANs, mode (shared/per-node)
+    * DNS Provider — Cloudflare, Route53, or Azure credentials
+    * Notifications — SMTP settings and recipients
+    * Scheduler — enable and set the daily run time
+      
 3. Add your ISE PSN nodes and designate a primary node
 4. Use Test Connection buttons to validate ISE and DNS connectivity
 
