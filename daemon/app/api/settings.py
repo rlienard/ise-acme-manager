@@ -1,1 +1,153 @@
+"""
+Settings API endpoints.
+"""
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from ..database import get_db, Settings, ISENode
+from ..config import ConfigManager
+from ..models import (
+    AllSettings, ISESettings, ACMESettings, CertificateSettings,
+    DNSSettings, SMTPSettings, SchedulerSettings,
+    ISENodeCreate, ISENodeResponse, MessageResponse
+)
+from ..scheduler import configure_scheduler
+from ..services.ise_client import ISEClient
+from ..services.dns_providers import get_dns_provider
+
+router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
+
+
+@router.get("", response_model=dict)
+def get_all_settings(db: Session = Depends(get_db)):
+    """Get all settings (secrets masked)."""
+    return ConfigManager.get_safe(db)
+
+
+@router.put("/ise", response_model=MessageResponse)
+def update_ise_settings(settings: ISESettings, db: Session = Depends(get_db)):
+    """Update ISE connection settings."""
+    ConfigManager.set_bulk(db, settings.model_dump(), "ise")
+    return MessageResponse(message="ISE settings updated")
+
+
+@router.put("/acme", response_model=MessageResponse)
+def update_acme_settings(settings: ACMESettings, db: Session = Depends(get_db)):
+    """Update ACME/DigiCert settings."""
+    ConfigManager.set_bulk(db, settings.model_dump(), "acme")
+    return MessageResponse(message="ACME settings updated")
+
+
+@router.put("/certificate", response_model=MessageResponse)
+def update_certificate_settings(settings: CertificateSettings, db: Session = Depends(get_db)):
+    """Update certificate settings."""
+    data = settings.model_dump()
+    data["certificate_mode"] = data["certificate_mode"].value
+    ConfigManager.set_bulk(db, data, "certificate")
+    return MessageResponse(message="Certificate settings updated")
+
+
+@router.put("/dns", response_model=MessageResponse)
+def update_dns_settings(settings: DNSSettings, db: Session = Depends(get_db)):
+    """Update DNS provider settings."""
+    data = settings.model_dump()
+    data["dns_provider"] = data["dns_provider"].value
+    ConfigManager.set_bulk(db, data, "dns")
+    return MessageResponse(message="DNS settings updated")
+
+
+@router.put("/smtp", response_model=MessageResponse)
+def update_smtp_settings(settings: SMTPSettings, db: Session = Depends(get_db)):
+    """Update SMTP notification settings."""
+    ConfigManager.set_bulk(db, settings.model_dump(), "smtp")
+    return MessageResponse(message="SMTP settings updated")
+
+
+@router.put("/scheduler", response_model=MessageResponse)
+def update_scheduler_settings(settings: SchedulerSettings, db: Session = Depends(get_db)):
+    """Update scheduler settings and reconfigure the scheduler."""
+    ConfigManager.set_bulk(db, settings.model_dump(), "scheduler")
+    configure_scheduler()
+    return MessageResponse(message="Scheduler settings updated and applied")
+
+
+# ──────────────────────────────
+# ISE Nodes
+# ──────────────────────────────
+
+@router.get("/nodes", response_model=list[ISENodeResponse])
+def get_nodes(db: Session = Depends(get_db)):
+    """Get all ISE nodes."""
+    return db.query(ISENode).all()
+
+
+@router.post("/nodes", response_model=ISENodeResponse)
+def add_node(node: ISENodeCreate, db: Session = Depends(get_db)):
+    """Add a new ISE node."""
+    existing = db.query(ISENode).filter(ISENode.name == node.name).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Node already exists")
+
+    # If this is primary, unset other primaries
+    if node.is_primary:
+        db.query(ISENode).update({ISENode.is_primary: False})
+
+    db_node = ISENode(**node.model_dump())
+    db.add(db_node)
+    db.commit()
+    db.refresh(db_node)
+    return db_node
+
+
+@router.put("/nodes/{node_id}", response_model=ISENodeResponse)
+def update_node(node_id: int, node: ISENodeCreate, db: Session = Depends(get_db)):
+    """Update an ISE node."""
+    db_node = db.query(ISENode).filter(ISENode.id == node_id).first()
+    if not db_node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    if node.is_primary:
+        db.query(ISENode).update({ISENode.is_primary: False})
+
+    for key, value in node.model_dump().items():
+        setattr(db_node, key, value)
+
+    db.commit()
+    db.refresh(db_node)
+    return db_node
+
+
+@router.delete("/nodes/{node_id}", response_model=MessageResponse)
+def delete_node(node_id: int, db: Session = Depends(get_db)):
+    """Delete an ISE node."""
+    db_node = db.query(ISENode).filter(ISENode.id == node_id).first()
+    if not db_node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    db.delete(db_node)
+    db.commit()
+    return MessageResponse(message=f"Node {db_node.name} deleted")
+
+
+# ──────────────────────────────
+# Connection Tests
+# ──────────────────────────────
+
+@router.post("/test/ise", response_model=dict)
+def test_ise_connection(db: Session = Depends(get_db)):
+    """Test ISE connectivity."""
+    config = ConfigManager.get_flat(db)
+    client = ISEClient(config)
+    return client.test_connection()
+
+
+@router.post("/test/dns", response_model=dict)
+def test_dns_connection(db: Session = Depends(get_db)):
+    """Test DNS provider connectivity."""
+    config = ConfigManager.get_flat(db)
+    try:
+        provider = get_dns_provider(config)
+        return provider.test_connection()
+    except Exception as e:
+        return {"success": False, "message": str(e)}
