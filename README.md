@@ -57,6 +57,8 @@ docker-compose ps
 |API Documentation|http://localhost:8443/api/docs|
 |Health Check|http://localhost:8443/health|
 
+---
+
 ## Configure
 
 1. Open the **Web Dashboard** at http://localhost:8080
@@ -71,6 +73,7 @@ docker-compose ps
 3. Add your ISE PSN nodes and designate a primary node
 4. Use Test Connection buttons to validate ISE and DNS connectivity
 
+---
 
 ## Features
 
@@ -86,6 +89,8 @@ docker-compose ps
 |Audit History | Full renewal history with logs and per-node results|
 |Connection Testing | Built-in ISE and DNS connectivity tests|
 |REST API | Full API with Swagger/OpenAPI documentation|
+
+---
 
 ## Certificate Modes
 
@@ -103,6 +108,8 @@ ACME → Cert A → PSN-01
 ACME → Cert B → PSN-02
 
 Set the mode in Settings → Certificate → Certificate Mode.
+
+---
 
 ## API Reference
 
@@ -129,43 +136,7 @@ All endpoints are documented interactively at /api/docs. Key endpoints:
 |GET | /api/v1/history/{run_id}/logs | Renewal run logs|
 |GET | /health | Health check|
 
-
-## Project Structure
-
-ise-acme-manager/
-├── docker-compose.yml          # Two-container orchestration
-├── daemon/                     # API Daemon (Container 2)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py             # FastAPI entry point
-│       ├── config.py           # Configuration manager
-│       ├── database.py         # SQLite models
-│       ├── models.py           # API schemas
-│       ├── scheduler.py        # Background scheduler
-│       ├── api/
-│       │   ├── settings.py     # Settings endpoints
-│       │   ├── status.py       # Status endpoints
-│       │   ├── history.py      # History endpoints
-│       │   ├── actions.py      # Manual action endpoints
-│       │   └── health.py       # Health check
-│       └── services/
-│           ├── ise_client.py   # Cisco ISE API client
-│           ├── dns_providers.py# DNS provider clients
-│           ├── acme_renewal.py # Renewal orchestrator
-│           └── notifier.py     # Email notifications
-└── web/                        # Web Interface (Container 1)
-    ├── Dockerfile
-    ├── nginx.conf              # Nginx config with API proxy
-    └── src/
-        ├── index.html
-        ├── css/styles.css
-        └── js/
-            ├── app.js          # SPA router
-            ├── api.js          # API client
-            ├── components/     # UI components
-            └── pages/          # Dashboard, Settings, History
-
+---
 
 ## ISE Preparation
 
@@ -181,6 +152,8 @@ Before using this tool, configure your Cisco ISE:
 1. Log into CertCentral → Automation → ACME Directory URLs
 2. Create an ACME directory URL
 3. Note the Directory URL, Key ID (KID), and HMAC Key
+
+---
 
 ## Operational Commands
 
@@ -208,6 +181,8 @@ docker cp ./backup.db ise-acme-daemon:/app/data/ise_acme.db
 docker-compose restart daemon
 ```
 
+---
+
 ## Security Recommendations
 
 |Area | Recommendation|
@@ -219,6 +194,7 @@ docker-compose restart daemon
 |Backups | Regularly backup the daemon data volume|
 |Updates | Keep containers updated; rebuild periodically|
 
+---
 
 ## Troubleshooting
 
@@ -247,6 +223,8 @@ db.close()
 "
 ```
 
-License
+---
+
+## License
 
 MIT License — see LICENSE for details.
