@@ -43,8 +43,8 @@ All managed through a **web dashboard** — no CLI required.
 
 ```bash
 # Clone
-git clone https://github.com/rlienard/ise-acme-manager.git
-cd ise-acme-manager
+git clone https://github.com/rlienard/acme-manager.git
+cd acme-manager
 
 # Build and start
 docker-compose up -d --build
@@ -181,10 +181,10 @@ docker-compose logs -f web
 docker-compose up -d --build
 
 # Backup database
-docker cp ise-acme-daemon:/app/data/ise_acme.db ./backup_$(date +%Y%m%d).db
+docker cp acme-daemon:/app/data/ise_acme.db ./backup_$(date +%Y%m%d).db
 
 # Restore database
-docker cp ./backup.db ise-acme-daemon:/app/data/ise_acme.db
+docker cp ./backup.db acme-daemon:/app/data/ise_acme.db
 docker-compose restart daemon
 ```
 
@@ -221,7 +221,7 @@ docker-compose restart daemon
 docker-compose logs -f daemon
 
 # Inspect database
-docker exec -it ise-acme-daemon python -c "
+docker exec -it acme-daemon python -c "
 from app.database import SessionLocal, RenewalHistory
 db = SessionLocal()
 for r in db.query(RenewalHistory).order_by(RenewalHistory.id.desc()).limit(5):
