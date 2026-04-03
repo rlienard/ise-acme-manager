@@ -61,6 +61,7 @@ const Settings = {
 
     afterRender() {
         this.showSection(this._activeSection || 'ise');
+        this.toggleACMEFields();
         this.toggleDNSFields();
         this.loadNodes();
         this.loadManagedCerts();
@@ -181,22 +182,39 @@ const Settings = {
     },
 
     renderACMESection(s) {
+        const provider = s.acme?.acme_provider || 'digicert';
         return `
         <div id="panel-acme" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-certificate"></i> ACME / DigiCert</h2>
+                <h2><i class="fas fa-certificate"></i> ACME Provider</h2>
                 <div class="form-grid">
-                    <div class="form-group" style="grid-column: span 2">
+                    <div class="form-group">
+                        <label>Provider</label>
+                        <select id="acme_provider" onchange="Settings.toggleACMEFields()">
+                            <option value="digicert" ${provider === 'digicert' ? 'selected' : ''}>DigiCert</option>
+                            <option value="letsencrypt" ${provider === 'letsencrypt' ? 'selected' : ''}>Let's Encrypt</option>
+                        </select>
+                    </div>
+                    <div class="form-group acme-field acme-digicert" style="grid-column: span 2">
                         <label>ACME Directory URL</label>
                         <input id="acme_directory_url" value="${s.acme?.acme_directory_url || 'https://acme.digicert.com/v2/acme/directory/'}">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group acme-field acme-digicert">
                         <label>Key ID (KID)</label>
                         <input id="acme_kid" type="password" value="" placeholder="Enter KID">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group acme-field acme-digicert">
                         <label>HMAC Key</label>
                         <input id="acme_hmac_key" type="password" value="" placeholder="Enter HMAC key">
+                    </div>
+                    <div class="form-group acme-field acme-letsencrypt" style="display:none">
+                        <label>Account Email</label>
+                        <input id="acme_account_email" value="${s.acme?.acme_account_email || ''}" placeholder="admin@yourdomain.com">
+                    </div>
+                    <div class="form-group acme-field acme-letsencrypt" style="display:none; grid-column: span 2">
+                        <label>ACME Directory URL</label>
+                        <input id="acme_directory_url_le" value="${provider === 'letsencrypt' ? (s.acme?.acme_directory_url || 'https://acme-api.letsencrypt.org/directory') : 'https://acme-api.letsencrypt.org/directory'}">
+                        <small style="color:var(--text-muted); font-size:0.75rem; margin-top:4px; display:block">Use https://acme-staging-v02.api.letsencrypt.org/directory for testing</small>
                     </div>
                 </div>
                 <div class="btn-group">
@@ -451,6 +469,12 @@ const Settings = {
 
     // ── DNS field toggling ──
 
+    toggleACMEFields() {
+        const provider = document.getElementById('acme_provider')?.value;
+        document.querySelectorAll('.acme-field').forEach(el => el.style.display = 'none');
+        document.querySelectorAll(`.acme-${provider}`).forEach(el => el.style.display = 'flex');
+    },
+
     toggleDNSFields() {
         const provider = document.getElementById('dns_provider')?.value;
         document.querySelectorAll('.dns-field').forEach(el => el.style.display = 'none');
@@ -527,13 +551,20 @@ const Settings = {
 
     async saveACME() {
         try {
-            const data = {
-                acme_directory_url: document.getElementById('acme_directory_url').value,
-                acme_kid: document.getElementById('acme_kid').value,
-                acme_hmac_key: document.getElementById('acme_hmac_key').value,
-            };
-            if (!data.acme_kid) delete data.acme_kid;
-            if (!data.acme_hmac_key) delete data.acme_hmac_key;
+            const provider = document.getElementById('acme_provider').value;
+            const data = { acme_provider: provider };
+
+            if (provider === 'digicert') {
+                data.acme_directory_url = document.getElementById('acme_directory_url').value;
+                data.acme_kid = document.getElementById('acme_kid').value;
+                data.acme_hmac_key = document.getElementById('acme_hmac_key').value;
+                if (!data.acme_kid) delete data.acme_kid;
+                if (!data.acme_hmac_key) delete data.acme_hmac_key;
+            } else {
+                data.acme_directory_url = document.getElementById('acme_directory_url_le').value;
+                data.acme_account_email = document.getElementById('acme_account_email').value;
+            }
+
             await api.updateACME(data);
             Toast.success('ACME settings saved');
         } catch (err) { Toast.error('Failed to save: ' + err.message); }

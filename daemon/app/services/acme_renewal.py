@@ -18,6 +18,7 @@ from ..config import ConfigManager
 from .ise_client import ISEClient
 from .dns_providers import get_dns_provider
 from .notifier import EmailNotifier
+from .acme_client import ACMEv2Client
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class ACMERenewalEngine:
             ise = ISEClient(config)
             dns = get_dns_provider(config)
             notifier = EmailNotifier(config)
+            acme_provider = config.get("acme_provider", "digicert")
 
             # Fetch enabled managed certificates
             managed_certs = (
@@ -94,7 +96,12 @@ class ACMERenewalEngine:
                 db.commit()
 
                 try:
-                    if mode == "shared":
+                    if acme_provider == "letsencrypt":
+                        if mode == "shared":
+                            results = self._renew_shared_letsencrypt(ise, dns, cert_config, cert_nodes, threshold, db)
+                        else:
+                            results = self._renew_per_node_letsencrypt(ise, dns, cert_config, cert_nodes, threshold, db)
+                    elif mode == "shared":
                         results = self._renew_shared(ise, dns, cert_config, cert_nodes, threshold, db)
                     else:
                         results = self._renew_per_node(ise, dns, cert_config, cert_nodes, threshold, db)
@@ -316,6 +323,171 @@ class ACMERenewalEngine:
                 dns.delete_txt_record(dns_record_id)
             except Exception:
                 pass
+
+        return results
+
+    # ── LetsEncrypt-specific flows ──────────────────────
+
+    def _build_acme_client(self, config, db):
+        """Build an ACMEv2Client, persisting the account key on first use."""
+        account_key_pem = config.get("acme_account_key") or None
+        client = ACMEv2Client(
+            directory_url=config.get("acme_directory_url"),
+            account_email=config.get("acme_account_email", ""),
+            account_key_pem=account_key_pem,
+        )
+        client.register_account()
+
+        # Persist the account key if it was freshly generated
+        if not account_key_pem:
+            new_pem = client.get_account_key_pem()
+            ConfigManager.set(db, "acme_account_key", new_pem, "acme")
+            logger.info("Persisted new ACME account key")
+
+        return client
+
+    def _renew_shared_letsencrypt(self, ise, dns, config, nodes, threshold, db):
+        """Shared-mode renewal via LetsEncrypt standalone ACME client."""
+        results = {}
+        cn = config.get("common_name", "")
+
+        primary_name = None
+        for node in nodes:
+            if node.is_primary:
+                primary_name = node.name
+                break
+        if not primary_name:
+            primary_name = nodes[0].name
+
+        secondary_nodes = [n for n in nodes if n.name != primary_name]
+
+        # Check expiry on the primary node
+        expiry = ise.check_certificate_expiry(cn, threshold, primary_name)
+        if not expiry["needs_renewal"]:
+            results[primary_name] = {"status": "ok", **expiry}
+            for node in secondary_nodes:
+                sec_expiry = ise.check_certificate_expiry(cn, threshold, node.name)
+                if sec_expiry["needs_renewal"]:
+                    results[node.name] = self._distribute_cert(ise, config, cn, primary_name, node.name)
+                else:
+                    results[node.name] = {"status": "ok", **sec_expiry}
+            return results
+
+        dns_record_id = None
+        try:
+            acme = self._build_acme_client(config, db)
+
+            # Determine all domains for the order
+            san_names = config.get("san_names", [])
+            all_domains = [cn] + [s for s in san_names if s != cn]
+
+            order = acme.create_order(all_domains)
+
+            # Process each authorization (one per domain)
+            for authz_url in order["authorizations"]:
+                authz = acme.get_authorization(authz_url)
+                domain = authz["identifier"]["value"]
+                challenge = acme.get_dns01_challenge(authz)
+
+                record_name = acme.get_dns_record_name(domain)
+                record_value = acme.get_dns_txt_value(challenge["token"])
+
+                dns_record_id = dns.create_txt_record(record_name, record_value)
+                time.sleep(90)  # Wait for DNS propagation
+
+                acme.respond_to_challenge(challenge["url"])
+                acme.poll_authorization(authz_url)
+
+            # Finalize and get certificate
+            cert_pem, key_pem = acme.finalize_order(order, cn, san_names)
+
+            # Import into ISE primary node
+            portal_group_tag = config.get("portal_group_tag", "")
+            ise.import_certificate(
+                {"certData": cert_pem, "privateKeyData": key_pem},
+                primary_name, portal_group_tag,
+            )
+
+            imported = ise.get_certificate_by_cn(cn, primary_name)
+            if imported:
+                ise.bind_certificate_to_portal(imported["id"], portal_group_tag, primary_name)
+                results[primary_name] = {"status": "renewed", "certificate_id": imported.get("id")}
+            else:
+                results[primary_name] = {"status": "renewed", "certificate_id": None}
+
+        except Exception as e:
+            results[primary_name] = {"status": "failed", "error": str(e)}
+        finally:
+            if dns_record_id:
+                try:
+                    dns.delete_txt_record(dns_record_id)
+                except Exception:
+                    pass
+
+        # Distribute to secondaries
+        if results.get(primary_name, {}).get("status") == "renewed":
+            for node in secondary_nodes:
+                results[node.name] = self._distribute_cert(ise, config, cn, primary_name, node.name)
+
+        return results
+
+    def _renew_per_node_letsencrypt(self, ise, dns, config, nodes, threshold, db):
+        """Per-node renewal via LetsEncrypt standalone ACME client."""
+        results = {}
+        cn = config.get("common_name", "")
+
+        for node in nodes:
+            name = node.name
+            dns_record_id = None
+            try:
+                expiry = ise.check_certificate_expiry(cn, threshold, name)
+                if not expiry["needs_renewal"]:
+                    results[name] = {"status": "ok", **expiry}
+                    continue
+
+                acme = self._build_acme_client(config, db)
+                san_names = config.get("san_names", [])
+                all_domains = [cn] + [s for s in san_names if s != cn]
+
+                order = acme.create_order(all_domains)
+
+                for authz_url in order["authorizations"]:
+                    authz = acme.get_authorization(authz_url)
+                    domain = authz["identifier"]["value"]
+                    challenge = acme.get_dns01_challenge(authz)
+
+                    record_name = acme.get_dns_record_name(domain)
+                    record_value = acme.get_dns_txt_value(challenge["token"])
+
+                    dns_record_id = dns.create_txt_record(record_name, record_value)
+                    time.sleep(90)
+
+                    acme.respond_to_challenge(challenge["url"])
+                    acme.poll_authorization(authz_url)
+
+                cert_pem, key_pem = acme.finalize_order(order, cn, san_names)
+
+                portal_group_tag = config.get("portal_group_tag", "")
+                ise.import_certificate(
+                    {"certData": cert_pem, "privateKeyData": key_pem},
+                    name, portal_group_tag,
+                )
+
+                imported = ise.get_certificate_by_cn(cn, name)
+                if imported:
+                    ise.bind_certificate_to_portal(imported["id"], portal_group_tag, name)
+                    results[name] = {"status": "renewed", "certificate_id": imported.get("id")}
+                else:
+                    results[name] = {"status": "renewed", "certificate_id": None}
+
+            except Exception as e:
+                results[name] = {"status": "failed", "error": str(e)}
+            finally:
+                if dns_record_id:
+                    try:
+                        dns.delete_txt_record(dns_record_id)
+                    except Exception:
+                        pass
 
         return results
 

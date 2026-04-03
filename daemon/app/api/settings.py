@@ -35,8 +35,11 @@ def update_ise_settings(settings: ISESettings, db: Session = Depends(get_db)):
 
 @router.put("/acme", response_model=MessageResponse)
 def update_acme_settings(settings: ACMESettings, db: Session = Depends(get_db)):
-    """Update ACME/DigiCert settings."""
-    ConfigManager.set_bulk(db, settings.model_dump(), "acme")
+    """Update ACME provider settings (DigiCert or LetsEncrypt)."""
+    data = settings.model_dump(exclude_none=True)
+    if "acme_provider" in data:
+        data["acme_provider"] = data["acme_provider"].value if hasattr(data["acme_provider"], "value") else data["acme_provider"]
+    ConfigManager.set_bulk(db, data, "acme")
     return MessageResponse(message="ACME settings updated")
 
 

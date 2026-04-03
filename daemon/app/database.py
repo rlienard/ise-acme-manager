@@ -235,9 +235,12 @@ def _seed_default_settings(db):
         ("ise_dns_server", "", "string", "ise", "Custom DNS server IP for resolving ISE FQDN (leave empty to use system default)", False),
 
         # ACME Settings
+        ("acme_provider", "digicert", "string", "acme", "ACME provider (digicert or letsencrypt)", False),
         ("acme_directory_url", "https://acme.digicert.com/v2/acme/directory/", "string", "acme", "ACME directory URL", False),
         ("acme_kid", "", "string", "acme", "ACME Key ID (KID)", True),
         ("acme_hmac_key", "", "string", "acme", "ACME HMAC Key", True),
+        ("acme_account_email", "", "string", "acme", "ACME account email (LetsEncrypt)", False),
+        ("acme_account_key", "", "string", "acme", "ACME account private key PEM (LetsEncrypt)", True),
 
         # Certificate Settings
         ("common_name", "", "string", "certificate", "Certificate Common Name", False),

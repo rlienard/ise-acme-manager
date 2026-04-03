@@ -17,6 +17,11 @@ class CertificateMode(str, Enum):
     PER_NODE = "per-node"
 
 
+class ACMEProvider(str, Enum):
+    DIGICERT = "digicert"
+    LETSENCRYPT = "letsencrypt"
+
+
 class DNSProvider(str, Enum):
     CLOUDFLARE = "cloudflare"
     AWS_ROUTE53 = "aws_route53"
@@ -43,12 +48,17 @@ class ISESettings(BaseModel):
 
 
 class ACMESettings(BaseModel):
+    acme_provider: ACMEProvider = Field(
+        ACMEProvider.DIGICERT,
+        description="ACME provider (digicert or letsencrypt)"
+    )
     acme_directory_url: str = Field(
         "https://acme.digicert.com/v2/acme/directory/",
         description="ACME directory URL"
     )
-    acme_kid: str = Field(..., description="ACME Key ID")
-    acme_hmac_key: str = Field(..., description="ACME HMAC Key")
+    acme_kid: Optional[str] = Field(None, description="ACME Key ID (DigiCert)")
+    acme_hmac_key: Optional[str] = Field(None, description="ACME HMAC Key (DigiCert)")
+    acme_account_email: Optional[str] = Field(None, description="Account email (LetsEncrypt)")
 
 
 class CertificateSettings(BaseModel):
