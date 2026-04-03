@@ -7,10 +7,10 @@ import os
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Boolean,
-    DateTime, Float, JSON, Enum as SQLEnum
+    DateTime, Float, JSON, Enum as SQLEnum, ForeignKey, Table
 )
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 import enum
 
 DATABASE_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -76,6 +76,33 @@ class ISENode(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+# ── Association table: ManagedCertificate ↔ ISENode ──
+certificate_node_assignments = Table(
+    "certificate_node_assignments", Base.metadata,
+    Column("certificate_id", Integer, ForeignKey("managed_certificates.id", ondelete="CASCADE"), primary_key=True),
+    Column("node_id", Integer, ForeignKey("ise_nodes.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class ManagedCertificate(Base):
+    """Multi-certificate management — each row is an independently managed cert."""
+    __tablename__ = "managed_certificates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    common_name = Column(String(255), nullable=False)
+    san_names = Column(JSON, default=[])
+    key_type = Column(String(50), default="RSA_2048")
+    portal_group_tag = Column(String(255), default="Default Portal Certificate Group")
+    certificate_mode = Column(String(20), default="shared")  # shared / per-node
+    renewal_threshold_days = Column(Integer, default=30)
+    enabled = Column(Boolean, default=True)
+    last_renewal_at = Column(DateTime, nullable=True)
+    last_renewal_status = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    nodes = relationship("ISENode", secondary=certificate_node_assignments, backref="managed_certificates")
+
+
 class RenewalHistory(Base):
     """Certificate renewal audit log."""
     __tablename__ = "renewal_history"
@@ -95,6 +122,7 @@ class RenewalHistory(Base):
     dns_challenge_cleaned = Column(Boolean, default=False)
     notification_sent = Column(Boolean, default=False)
     log_output = Column(Text, nullable=True)
+    managed_certificate_id = Column(Integer, ForeignKey("managed_certificates.id", ondelete="SET NULL"), nullable=True)
 
 
 class DaemonStatus(Base):
@@ -141,8 +169,58 @@ def init_db():
             _seed_default_settings(db)
 
         db.commit()
+
+        # Migrate legacy single-cert config to managed certificates
+        _migrate_single_cert_to_managed(db)
+
     finally:
         db.close()
+
+
+def _migrate_single_cert_to_managed(db):
+    """Migrate legacy single-cert settings to a ManagedCertificate row (runs once)."""
+    import json
+    if db.query(ManagedCertificate).count() > 0:
+        return
+
+    cn_setting = db.query(Settings).filter(Settings.key == "common_name").first()
+    if not cn_setting or not cn_setting.value:
+        return
+
+    # Read legacy settings
+    def _get(key, default=None):
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row or not row.value:
+            return default
+        return row.value
+
+    san_raw = _get("san_names", "[]")
+    try:
+        san_names = json.loads(san_raw)
+    except (ValueError, TypeError):
+        san_names = []
+
+    try:
+        threshold = int(_get("renewal_threshold_days", "30"))
+    except (ValueError, TypeError):
+        threshold = 30
+
+    cert = ManagedCertificate(
+        common_name=cn_setting.value,
+        san_names=san_names,
+        key_type=_get("key_type", "RSA_2048"),
+        portal_group_tag=_get("portal_group_tag", "Default Portal Certificate Group"),
+        certificate_mode=_get("certificate_mode", "shared"),
+        renewal_threshold_days=threshold,
+        enabled=True,
+    )
+    db.add(cert)
+    db.flush()
+
+    # Assign all enabled nodes
+    enabled_nodes = db.query(ISENode).filter(ISENode.enabled == True).all()
+    cert.nodes = enabled_nodes
+    db.commit()
 
 
 def _seed_default_settings(db):

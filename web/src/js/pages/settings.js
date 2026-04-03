@@ -1,24 +1,96 @@
 /**
- * Settings page — configure all daemon parameters.
- * (Completing the save methods and DNS toggle that were cut off)
+ * Settings page — sidebar-navigated layout with 7 sections.
  */
 
 const Settings = {
     currentSettings: {},
+    _activeSection: 'ise',
+    _discoveredNodes: [],
+
+    _sections: [
+        { id: 'ise',           icon: 'fa-server',    label: 'ISE Connector'    },
+        { id: 'acme',          icon: 'fa-certificate', label: 'ACME Providers'  },
+        { id: 'certificates',  icon: 'fa-lock',      label: 'Certificates'     },
+        { id: 'dns',           icon: 'fa-globe',     label: 'DNS Providers'    },
+        { id: 'notifications', icon: 'fa-envelope',  label: 'Notifications'    },
+        { id: 'scheduler',     icon: 'fa-clock',     label: 'Scheduler'        },
+        { id: 'system',        icon: 'fa-sliders-h', label: 'System Settings'  },
+    ],
 
     async render() {
         try {
             this.currentSettings = await api.getSettings();
             const s = this.currentSettings;
 
+            const sidebarItems = this._sections.map(sec => `
+                <li class="settings-nav__item">
+                    <a href="#" data-section="${sec.id}" onclick="Settings.showSection('${sec.id}'); return false;">
+                        <i class="fas ${sec.icon}"></i> ${sec.label}
+                    </a>
+                </li>`).join('');
+
             return `
             <div class="page-header">
                 <h1><i class="fas fa-cog"></i> Settings</h1>
             </div>
+            <div class="settings-layout">
+                <aside class="settings-sidebar" id="settings-sidebar">
+                    <div class="settings-sidebar__title">Configuration</div>
+                    <button class="settings-sidebar__toggle" onclick="Settings.toggleMobileMenu()">
+                        <i class="fas fa-bars"></i> Menu
+                    </button>
+                    <ul class="settings-nav" id="settings-nav">${sidebarItems}</ul>
+                </aside>
+                <div class="settings-content">
+                    ${this.renderISESection(s)}
+                    ${this.renderACMESection(s)}
+                    ${this.renderCertificatesSection(s)}
+                    ${this.renderDNSSection(s)}
+                    ${this.renderNotificationsSection(s)}
+                    ${this.renderSchedulerSection(s)}
+                    ${this.renderSystemSection(s)}
+                </div>
+            </div>`;
+        } catch (err) {
+            return `<div class="settings-section" style="border-color:var(--danger)">
+                <h2><i class="fas fa-exclamation-triangle" style="color:var(--danger)"></i> Error</h2>
+                <p>Failed to load settings: ${err.message}</p>
+            </div>`;
+        }
+    },
 
-            <!-- ISE Settings -->
+    afterRender() {
+        this.showSection(this._activeSection || 'ise');
+        this.toggleDNSFields();
+        this.loadNodes();
+        this.loadManagedCerts();
+    },
+
+    showSection(id) {
+        this._activeSection = id;
+        document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.settings-nav__item a').forEach(a => a.classList.remove('active'));
+        const panel = document.getElementById(`panel-${id}`);
+        if (panel) panel.classList.add('active');
+        const link = document.querySelector(`.settings-nav__item a[data-section="${id}"]`);
+        if (link) link.classList.add('active');
+        // Close mobile menu on selection
+        const sidebar = document.getElementById('settings-sidebar');
+        if (sidebar) sidebar.classList.remove('open');
+    },
+
+    toggleMobileMenu() {
+        const sidebar = document.getElementById('settings-sidebar');
+        if (sidebar) sidebar.classList.toggle('open');
+    },
+
+    // ── Section Renderers ──
+
+    renderISESection(s) {
+        return `
+        <div id="panel-ise" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-server"></i> Cisco ISE Connection</h2>
+                <h2><i class="fas fa-server"></i> ISE Connection</h2>
                 <div class="form-grid">
                     <div class="form-group">
                         <label>ISE PAN Hostname</label>
@@ -40,10 +112,6 @@ const Settings = {
                         <label>Open API Port</label>
                         <input id="ise_open_api_port" type="number" value="${s.ise?.ise_open_api_port || 443}">
                     </div>
-                    <div class="form-group">
-                        <label>Custom DNS Server <small style="color:var(--text-muted)">(optional — for resolving ISE FQDN)</small></label>
-                        <input id="ise_dns_server" value="${s.ise?.ise_dns_server || ''}" placeholder="e.g. 192.168.1.53 (leave empty for system default)">
-                    </div>
                 </div>
                 <div class="btn-group">
                     <button class="btn btn-primary btn-sm" onclick="Settings.saveISE()">
@@ -58,7 +126,63 @@ const Settings = {
                 </div>
             </div>
 
-            <!-- ACME Settings -->
+            <!-- ISE Nodes -->
+            <div class="settings-section">
+                <h2><i class="fas fa-network-wired"></i> ISE Nodes</h2>
+                <div class="btn-group" style="margin-bottom:1rem">
+                    <button class="btn btn-primary btn-sm" onclick="Settings.discoverNodes()">
+                        <i class="fas fa-search"></i> Discover Nodes via ERS
+                    </button>
+                </div>
+                <div id="discovery-results" style="display:none; margin-bottom:1rem; border:1px solid var(--border); border-radius:8px; padding:1rem">
+                    <h3 style="margin-top:0"><i class="fas fa-satellite-dish"></i> Discovered Nodes</h3>
+                    <table id="discovery-table"></table>
+                    <div class="btn-group" style="margin-top:0.75rem">
+                        <button class="btn btn-success btn-sm" onclick="Settings.syncDiscoveredNodes()">
+                            <i class="fas fa-sync"></i> Sync Selected Nodes
+                        </button>
+                        <button class="btn btn-outline btn-sm" onclick="document.getElementById('discovery-results').style.display='none'">
+                            <i class="fas fa-times"></i> Dismiss
+                        </button>
+                    </div>
+                </div>
+                <div id="nodes-list"></div>
+                <details style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
+                    <summary style="cursor:pointer; color:var(--text-muted); font-size:0.9rem"><i class="fas fa-plus-circle"></i> Manual Node Entry</summary>
+                    <div class="form-grid" style="margin-top:0.75rem">
+                        <div class="form-group">
+                            <label>Node Hostname (FQDN)</label>
+                            <input id="new_node_name" placeholder="ise-psn01.yourdomain.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Role</label>
+                            <select id="new_node_role">
+                                <option value="PSN">PSN</option>
+                                <option value="PAN">PAN</option>
+                                <option value="MnT">MnT</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Primary Node?</label>
+                            <select id="new_node_primary">
+                                <option value="false">No</option>
+                                <option value="true">Yes</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-success btn-sm" onclick="Settings.addNode()">
+                            <i class="fas fa-plus"></i> Add Node
+                        </button>
+                    </div>
+                </details>
+            </div>
+        </div>`;
+    },
+
+    renderACMESection(s) {
+        return `
+        <div id="panel-acme" class="settings-panel">
             <div class="settings-section">
                 <h2><i class="fas fa-certificate"></i> ACME / DigiCert</h2>
                 <div class="form-grid">
@@ -81,59 +205,107 @@ const Settings = {
                     </button>
                 </div>
             </div>
+        </div>`;
+    },
 
-            <!-- Certificate Settings -->
+    renderCertificatesSection(s) {
+        return `
+        <div id="panel-certificates" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-lock"></i> Certificate</h2>
-                <div class="form-grid">
-                    <div class="form-group" style="grid-column: span 2">
-                        <label>
-                            Common Name
-                            <button class="btn btn-outline btn-sm" onclick="Settings.loadCertificateOptions()" style="float:right; padding:2px 8px; font-size:0.75rem">
-                                <i class="fas fa-sync-alt"></i> Load from ISE
-                            </button>
-                        </label>
-                        <select id="common_name">
-                            <option value="">-- Select a certificate or type manually below --</option>
-                        </select>
-                        <input id="common_name_manual" value="${s.certificate?.common_name || ''}" placeholder="Or type manually: guest.yourdomain.com" style="margin-top:0.5rem">
+                <h2><i class="fas fa-lock"></i> Certificates</h2>
+
+                <!-- ISE Certificate Discovery -->
+                <div style="margin-bottom:1.5rem">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem">
+                        <h3 style="font-size:0.95rem; color:var(--text-muted)">Discovered ISE Certificates</h3>
+                        <button class="btn btn-outline btn-sm" onclick="Settings.fetchISECertificates()">
+                            <i class="fas fa-sync-alt"></i> Fetch from ISE
+                        </button>
                     </div>
-                    <div class="form-group">
-                        <label>SAN Names (comma-separated)</label>
-                        <input id="san_names" value="${(s.certificate?.san_names || []).join(',')}" placeholder="guest.yourdomain.com,portal.yourdomain.com">
-                    </div>
-                    <div class="form-group">
-                        <label>Key Type</label>
-                        <select id="key_type">
-                            <option value="RSA_2048" ${s.certificate?.key_type === 'RSA_2048' ? 'selected' : ''}>RSA 2048</option>
-                            <option value="RSA_4096" ${s.certificate?.key_type === 'RSA_4096' ? 'selected' : ''}>RSA 4096</option>
-                            <option value="ECDSA_256" ${s.certificate?.key_type === 'ECDSA_256' ? 'selected' : ''}>ECDSA 256</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Certificate Mode</label>
-                        <select id="certificate_mode">
-                            <option value="shared" ${s.certificate?.certificate_mode === 'shared' ? 'selected' : ''}>Shared (one cert for all nodes)</option>
-                            <option value="per-node" ${s.certificate?.certificate_mode === 'per-node' ? 'selected' : ''}>Per-Node (independent certs)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Portal Group Tag</label>
-                        <input id="portal_group_tag" value="${s.certificate?.portal_group_tag || 'Default Portal Certificate Group'}">
-                    </div>
-                    <div class="form-group">
-                        <label>Renewal Threshold (days before expiry)</label>
-                        <input id="renewal_threshold_days" type="number" value="${s.certificate?.renewal_threshold_days || 30}" min="1" max="365">
+                    <div id="ise-certs-table">
+                        <p style="color:var(--text-muted); font-size:0.875rem">Click "Fetch from ISE" to load available certificates.</p>
                     </div>
                 </div>
-                <div class="btn-group">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.saveCertificate()">
-                        <i class="fas fa-save"></i> Save Certificate Settings
-                    </button>
+
+                <!-- Managed Certificates -->
+                <div>
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem">
+                        <h3 style="font-size:0.95rem; color:var(--text-muted)">Managed Certificates (Auto-Renew)</h3>
+                        <button class="btn btn-primary btn-sm" onclick="Settings.showCertForm()">
+                            <i class="fas fa-plus"></i> Add Certificate
+                        </button>
+                    </div>
+                    <div id="managed-certs-table">
+                        <p style="color:var(--text-muted); font-size:0.875rem">Loading...</p>
+                    </div>
+                </div>
+
+                <!-- Add/Edit Form (hidden by default) -->
+                <div id="cert-form-panel" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.25rem">
+                    <h3 style="font-size:0.95rem; margin-bottom:1rem" id="cert-form-title">Add Certificate</h3>
+                    <input type="hidden" id="cert-form-id">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Common Name</label>
+                            <input id="cert-cn" placeholder="guest.yourdomain.com">
+                        </div>
+                        <div class="form-group">
+                            <label>SAN Names (comma-separated)</label>
+                            <input id="cert-san" placeholder="guest.yourdomain.com,portal.yourdomain.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Key Type</label>
+                            <select id="cert-key-type">
+                                <option value="RSA_2048">RSA 2048</option>
+                                <option value="RSA_4096">RSA 4096</option>
+                                <option value="ECDSA_256">ECDSA 256</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Certificate Mode</label>
+                            <select id="cert-mode">
+                                <option value="shared">Shared (one cert for all nodes)</option>
+                                <option value="per-node">Per-Node (independent certs)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Portal Group Tag</label>
+                            <input id="cert-portal-tag" value="Default Portal Certificate Group">
+                        </div>
+                        <div class="form-group">
+                            <label>Renewal Threshold (days)</label>
+                            <input id="cert-threshold" type="number" value="30" min="1" max="365">
+                        </div>
+                        <div class="form-group">
+                            <label>Enabled</label>
+                            <select id="cert-enabled">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="grid-column: span 2">
+                            <label>Assign to ISE Nodes</label>
+                            <div id="cert-node-checkboxes" style="display:flex; flex-wrap:wrap; gap:0.75rem; padding:0.5rem 0">
+                                <span style="color:var(--text-muted); font-size:0.875rem">Loading nodes...</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="Settings.saveManagedCert()">
+                            <i class="fas fa-save"></i> Save Certificate
+                        </button>
+                        <button class="btn btn-outline btn-sm" onclick="Settings.hideCertForm()">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                    </div>
                 </div>
             </div>
+        </div>`;
+    },
 
-            <!-- DNS Settings -->
+    renderDNSSection(s) {
+        return `
+        <div id="panel-dns" class="settings-panel">
             <div class="settings-section">
                 <h2><i class="fas fa-globe"></i> DNS Provider</h2>
                 <div class="form-grid">
@@ -145,7 +317,6 @@ const Settings = {
                             <option value="azure_dns" ${s.dns?.dns_provider === 'azure_dns' ? 'selected' : ''}>Azure DNS</option>
                         </select>
                     </div>
-                    <!-- Cloudflare -->
                     <div class="form-group dns-field dns-cloudflare">
                         <label>Cloudflare API Token</label>
                         <input id="cloudflare_api_token" type="password" placeholder="Enter token">
@@ -154,7 +325,6 @@ const Settings = {
                         <label>Cloudflare Zone ID</label>
                         <input id="cloudflare_zone_id" value="${s.dns?.cloudflare_zone_id || ''}">
                     </div>
-                    <!-- AWS Route53 -->
                     <div class="form-group dns-field dns-aws_route53" style="display:none">
                         <label>Hosted Zone ID</label>
                         <input id="aws_hosted_zone_id" value="${s.dns?.aws_hosted_zone_id || ''}">
@@ -163,7 +333,6 @@ const Settings = {
                         <label>AWS Region</label>
                         <input id="aws_region" value="${s.dns?.aws_region || 'us-east-1'}">
                     </div>
-                    <!-- Azure DNS -->
                     <div class="form-group dns-field dns-azure_dns" style="display:none">
                         <label>Subscription ID</label>
                         <input id="azure_subscription_id" value="${s.dns?.azure_subscription_id || ''}">
@@ -186,8 +355,12 @@ const Settings = {
                     </button>
                 </div>
             </div>
+        </div>`;
+    },
 
-            <!-- SMTP Settings -->
+    renderNotificationsSection(s) {
+        return `
+        <div id="panel-notifications" class="settings-panel">
             <div class="settings-section">
                 <h2><i class="fas fa-envelope"></i> Email Notifications</h2>
                 <div class="form-grid">
@@ -218,8 +391,12 @@ const Settings = {
                     </button>
                 </div>
             </div>
+        </div>`;
+    },
 
-            <!-- Scheduler Settings -->
+    renderSchedulerSection(s) {
+        return `
+        <div id="panel-scheduler" class="settings-panel">
             <div class="settings-section">
                 <h2><i class="fas fa-clock"></i> Scheduler</h2>
                 <div class="form-grid">
@@ -249,83 +426,38 @@ const Settings = {
                     </button>
                 </div>
             </div>
+        </div>`;
+    },
 
-            <!-- ISE Nodes Management -->
+    renderSystemSection(s) {
+        return `
+        <div id="panel-system" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-network-wired"></i> ISE Nodes</h2>
-
-                <div class="btn-group" style="margin-bottom:1rem">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.discoverNodes()">
-                        <i class="fas fa-search"></i> Discover Nodes via ERS
+                <h2><i class="fas fa-sliders-h"></i> System Settings</h2>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Custom DNS Server <small style="color:var(--text-muted)">(optional — for resolving ISE FQDN)</small></label>
+                        <input id="ise_dns_server" value="${s.ise?.ise_dns_server || ''}" placeholder="e.g. 192.168.1.53 (leave empty for system default)">
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-primary btn-sm" onclick="Settings.saveSystem()">
+                        <i class="fas fa-save"></i> Save System Settings
                     </button>
                 </div>
-
-                <div id="discovery-results" style="display:none; margin-bottom:1rem; border:1px solid var(--border); border-radius:8px; padding:1rem; background:var(--bg-secondary)">
-                    <h3 style="margin-top:0"><i class="fas fa-satellite-dish"></i> Discovered Nodes</h3>
-                    <table id="discovery-table"></table>
-                    <div class="btn-group" style="margin-top:0.75rem">
-                        <button class="btn btn-success btn-sm" onclick="Settings.syncDiscoveredNodes()">
-                            <i class="fas fa-sync"></i> Sync Selected Nodes
-                        </button>
-                        <button class="btn btn-outline btn-sm" onclick="document.getElementById('discovery-results').style.display='none'">
-                            <i class="fas fa-times"></i> Dismiss
-                        </button>
-                    </div>
-                </div>
-
-                <div id="nodes-list"></div>
-
-                <details style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
-                    <summary style="cursor:pointer; color:var(--text-muted); font-size:0.9rem"><i class="fas fa-plus-circle"></i> Manual Node Entry</summary>
-                    <div class="form-grid" style="margin-top:0.75rem">
-                        <div class="form-group">
-                            <label>Node Hostname (FQDN)</label>
-                            <input id="new_node_name" placeholder="ise-psn01.yourdomain.com">
-                        </div>
-                        <div class="form-group">
-                            <label>Role</label>
-                            <select id="new_node_role">
-                                <option value="PSN">PSN</option>
-                                <option value="PAN">PAN</option>
-                                <option value="MnT">MnT</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Primary Node?</label>
-                            <select id="new_node_primary">
-                                <option value="false">No</option>
-                                <option value="true">Yes</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="btn-group">
-                        <button class="btn btn-success btn-sm" onclick="Settings.addNode()">
-                            <i class="fas fa-plus"></i> Add Node
-                        </button>
-                    </div>
-                </details>
-            </div>`;
-        } catch (err) {
-            return `<div class="settings-section" style="border-color:var(--danger)">
-                <h2><i class="fas fa-exclamation-triangle" style="color:var(--danger)"></i> Error</h2>
-                <p>Failed to load settings: ${err.message}</p>
-            </div>`;
-        }
+            </div>
+        </div>`;
     },
 
-    afterRender() {
-        this.toggleDNSFields();
-        this.loadNodes();
-        if (this.currentSettings?.ise?.ise_host) {
-            this.loadCertificateOptions();
-        }
-    },
+    // ── DNS field toggling ──
 
     toggleDNSFields() {
         const provider = document.getElementById('dns_provider')?.value;
         document.querySelectorAll('.dns-field').forEach(el => el.style.display = 'none');
         document.querySelectorAll(`.dns-${provider}`).forEach(el => el.style.display = 'flex');
     },
+
+    // ── Node list ──
 
     async loadNodes() {
         try {
@@ -386,7 +518,6 @@ const Settings = {
                 ise_password: document.getElementById('ise_password').value,
                 ise_ers_port: parseInt(document.getElementById('ise_ers_port').value),
                 ise_open_api_port: parseInt(document.getElementById('ise_open_api_port').value),
-                ise_dns_server: document.getElementById('ise_dns_server').value || null,
             };
             if (!data.ise_password) delete data.ise_password;
             await api.updateISE(data);
@@ -408,29 +539,6 @@ const Settings = {
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
     },
 
-    async saveCertificate() {
-        try {
-            const sanInput = document.getElementById('san_names').value;
-            const cnFromDropdown = document.getElementById('common_name').value;
-            const cnFromManual = document.getElementById('common_name_manual').value;
-            const common_name = cnFromDropdown || cnFromManual;
-            if (!common_name) {
-                Toast.warning('Please select or enter a Common Name');
-                return;
-            }
-            const data = {
-                common_name,
-                san_names: sanInput ? sanInput.split(',').map(s => s.trim()).filter(Boolean) : [],
-                key_type: document.getElementById('key_type').value,
-                certificate_mode: document.getElementById('certificate_mode').value,
-                portal_group_tag: document.getElementById('portal_group_tag').value,
-                renewal_threshold_days: parseInt(document.getElementById('renewal_threshold_days').value),
-            };
-            await api.updateCertificate(data);
-            Toast.success('Certificate settings saved');
-        } catch (err) { Toast.error('Failed to save: ' + err.message); }
-    },
-
     async saveDNS() {
         try {
             const data = {
@@ -443,7 +551,6 @@ const Settings = {
                 azure_resource_group: document.getElementById('azure_resource_group')?.value || null,
                 azure_dns_zone_name: document.getElementById('azure_dns_zone_name')?.value || null,
             };
-            // Remove empty secrets
             if (!data.cloudflare_api_token) delete data.cloudflare_api_token;
             await api.updateDNS(data);
             Toast.success('DNS settings saved');
@@ -479,17 +586,33 @@ const Settings = {
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
     },
 
+    async saveSystem() {
+        try {
+            const data = {
+                ise_dns_server: document.getElementById('ise_dns_server').value || null,
+            };
+            await api.updateISE(data);
+            Toast.success('System settings saved');
+        } catch (err) { Toast.error('Failed to save: ' + err.message); }
+    },
+
     // ── Connection Tests ──
 
     async testISE() {
         try {
             Toast.info('Testing ISE connection...');
             const result = await api.testISE();
-            if (result.success) {
-                Toast.success('ISE connection successful!');
-            } else {
-                Toast.error('ISE connection failed: ' + result.message);
-            }
+            if (result.success) Toast.success('ISE connection successful!');
+            else Toast.error('ISE connection failed: ' + result.message);
+        } catch (err) { Toast.error('Test failed: ' + err.message); }
+    },
+
+    async testERS() {
+        try {
+            Toast.info('Testing ERS connection...');
+            const result = await api.testERS();
+            if (result.success) Toast.success('ERS connection successful!');
+            else Toast.error('ERS connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }
     },
 
@@ -497,11 +620,8 @@ const Settings = {
         try {
             Toast.info('Testing DNS provider connection...');
             const result = await api.testDNS();
-            if (result.success) {
-                Toast.success('DNS connection successful: ' + result.message);
-            } else {
-                Toast.error('DNS connection failed: ' + result.message);
-            }
+            if (result.success) Toast.success('DNS connection successful: ' + result.message);
+            else Toast.error('DNS connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }
     },
 
@@ -515,10 +635,7 @@ const Settings = {
                 enabled: true,
                 is_primary: document.getElementById('new_node_primary').value === 'true',
             };
-            if (!data.name) {
-                Toast.warning('Please enter a node hostname');
-                return;
-            }
+            if (!data.name) { Toast.warning('Please enter a node hostname'); return; }
             await api.addNode(data);
             Toast.success(`Node ${data.name} added`);
             document.getElementById('new_node_name').value = '';
@@ -545,20 +662,6 @@ const Settings = {
 
     // ── ERS Discovery ──
 
-    async testERS() {
-        try {
-            Toast.info('Testing ERS connection...');
-            const result = await api.testERS();
-            if (result.success) {
-                Toast.success('ERS connection successful!');
-            } else {
-                Toast.error('ERS connection failed: ' + result.message);
-            }
-        } catch (err) { Toast.error('Test failed: ' + err.message); }
-    },
-
-    _discoveredNodes: [],
-
     async discoverNodes() {
         try {
             Toast.info('Discovering ISE deployment nodes...');
@@ -573,17 +676,13 @@ const Settings = {
                 <thead>
                     <tr>
                         <th><input type="checkbox" id="discovery-select-all" onchange="Settings.toggleDiscoverySelectAll(this.checked)" checked></th>
-                        <th>Name</th>
-                        <th>FQDN</th>
-                        <th>Roles</th>
-                        <th>Primary PAN</th>
+                        <th>Name</th><th>FQDN</th><th>Roles</th><th>Primary PAN</th>
                     </tr>
                 </thead>
                 <tbody>
                     ${result.nodes.map((node, idx) => {
                         const hasPSN = node.roles.includes('PSN');
-                        return `
-                        <tr>
+                        return `<tr>
                             <td><input type="checkbox" class="discovery-check" data-idx="${idx}" ${hasPSN ? 'checked' : ''}></td>
                             <td><strong>${node.name}</strong></td>
                             <td>${node.fqdn}</td>
@@ -605,25 +704,12 @@ const Settings = {
     async syncDiscoveredNodes() {
         try {
             const checks = document.querySelectorAll('.discovery-check:checked');
-            if (checks.length === 0) {
-                Toast.warning('No nodes selected');
-                return;
-            }
-
+            if (checks.length === 0) { Toast.warning('No nodes selected'); return; }
             const nodes = [];
             checks.forEach(cb => {
-                const idx = parseInt(cb.dataset.idx);
-                const node = this._discoveredNodes[idx];
-                if (node) {
-                    nodes.push({
-                        name: node.fqdn,
-                        role: node.roles.join(','),
-                        enabled: true,
-                        is_primary: node.is_primary_pan,
-                    });
-                }
+                const node = this._discoveredNodes[parseInt(cb.dataset.idx)];
+                if (node) nodes.push({ name: node.fqdn, role: node.roles.join(','), enabled: true, is_primary: node.is_primary_pan });
             });
-
             const result = await api.syncNodes(nodes);
             Toast.success(result.message);
             document.getElementById('discovery-results').style.display = 'none';
@@ -631,7 +717,7 @@ const Settings = {
         } catch (err) { Toast.error('Sync failed: ' + err.message); }
     },
 
-    // ── Certificate Loading ──
+    // ── Managed Certificates UI ──
 
     _extractCN(subject) {
         if (!subject) return '';
@@ -639,33 +725,205 @@ const Settings = {
         return match ? match[1].trim() : subject;
     },
 
-    async loadCertificateOptions() {
+    async fetchISECertificates() {
+        const container = document.getElementById('ise-certs-table');
+        if (!container) return;
+        container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">Fetching...</p>';
         try {
             const certs = await api.getCertificates();
-            const select = document.getElementById('common_name');
-            if (!select) return;
-
-            select.innerHTML = '<option value="">-- Select a certificate --</option>';
-            certs.forEach(cert => {
-                const cn = this._extractCN(cert.subject);
-                const expiry = cert.expiration_date ? ` (expires: ${cert.expiration_date.split('T')[0]})` : '';
-                const usedBy = cert.used_by ? ` [${cert.used_by}]` : '';
-                const opt = document.createElement('option');
-                opt.value = cn;
-                opt.textContent = `${cert.friendly_name}${usedBy}${expiry}`;
-                select.appendChild(opt);
-            });
-
-            const current = document.getElementById('common_name_manual')?.value;
-            if (current) {
-                select.value = current;
+            if (!certs.length) {
+                container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No certificates found on ISE.</p>';
+                return;
             }
+            container.innerHTML = `
+                <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>Friendly Name</th><th>Subject / CN</th><th>Issuer</th>
+                        <th>Expiry</th><th>Used By</th><th>Action</th>
+                    </tr></thead>
+                    <tbody>
+                        ${certs.map(cert => {
+                            const cn = this._extractCN(cert.subject);
+                            const expiry = cert.expiration_date ? cert.expiration_date.split('T')[0] : '—';
+                            return `<tr>
+                                <td>${cert.friendly_name}</td>
+                                <td><code style="font-size:0.8rem">${cn}</code></td>
+                                <td style="font-size:0.8rem; color:var(--text-muted)">${cert.issuer || '—'}</td>
+                                <td style="font-size:0.8rem">${expiry}</td>
+                                <td style="font-size:0.8rem">${cert.used_by || '—'}</td>
+                                <td>
+                                    <button class="btn btn-outline btn-sm" onclick="Settings.showCertForm('${cn.replace(/'/g, "\\'")}')">
+                                        <i class="fas fa-plus"></i> Add to Auto-Renew
+                                    </button>
+                                </td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+                </div>`;
         } catch (err) {
-            // Silently fail on auto-load — ISE may not be reachable yet
-            const select = document.getElementById('common_name');
-            if (select) {
-                select.innerHTML = '<option value="">-- Could not load certificates --</option>';
-            }
+            container.innerHTML = `<p style="color:var(--danger); font-size:0.875rem">Failed to load: ${err.message}</p>`;
         }
-    }
+    },
+
+    async loadManagedCerts() {
+        const container = document.getElementById('managed-certs-table');
+        if (!container) return;
+        try {
+            const certs = await api.getManagedCertificates();
+            if (!certs.length) {
+                container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No managed certificates configured yet.</p>';
+                return;
+            }
+            container.innerHTML = `
+                <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>Common Name</th><th>Key Type</th><th>Mode</th>
+                        <th>Threshold</th><th>Assigned Nodes</th><th>Enabled</th><th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                        ${certs.map(cert => `<tr>
+                            <td><strong>${cert.common_name}</strong></td>
+                            <td><span class="badge info">${cert.key_type}</span></td>
+                            <td><span class="badge neutral">${cert.certificate_mode}</span></td>
+                            <td>${cert.renewal_threshold_days}d</td>
+                            <td style="font-size:0.8rem">${cert.nodes.map(n => n.name).join(', ') || '—'}</td>
+                            <td>${cert.enabled ? '<span class="badge success">Yes</span>' : '<span class="badge neutral">No</span>'}</td>
+                            <td>
+                                <button class="btn btn-outline btn-sm" onclick="Settings.editManagedCert(${cert.id})">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                                <button class="btn btn-danger btn-sm" onclick="Settings.deleteManagedCert(${cert.id}, '${cert.common_name.replace(/'/g, "\\'")}')">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+                </div>`;
+        } catch (err) {
+            container.innerHTML = `<p style="color:var(--danger); font-size:0.875rem">Failed to load: ${err.message}</p>`;
+        }
+    },
+
+    async showCertForm(prefillCN = '') {
+        // Ensure we're on the certificates panel
+        this.showSection('certificates');
+
+        const panel = document.getElementById('cert-form-panel');
+        const title = document.getElementById('cert-form-title');
+        if (!panel) return;
+
+        // Reset form
+        document.getElementById('cert-form-id').value = '';
+        document.getElementById('cert-cn').value = prefillCN;
+        document.getElementById('cert-san').value = '';
+        document.getElementById('cert-key-type').value = 'RSA_2048';
+        document.getElementById('cert-mode').value = 'shared';
+        document.getElementById('cert-portal-tag').value = 'Default Portal Certificate Group';
+        document.getElementById('cert-threshold').value = '30';
+        document.getElementById('cert-enabled').value = 'true';
+        if (title) title.textContent = 'Add Certificate';
+
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        await this._loadNodeCheckboxes([]);
+    },
+
+    async editManagedCert(id) {
+        try {
+            const certs = await api.getManagedCertificates();
+            const cert = certs.find(c => c.id === id);
+            if (!cert) return;
+
+            this.showSection('certificates');
+            const panel = document.getElementById('cert-form-panel');
+            const title = document.getElementById('cert-form-title');
+            if (!panel) return;
+
+            document.getElementById('cert-form-id').value = cert.id;
+            document.getElementById('cert-cn').value = cert.common_name;
+            document.getElementById('cert-san').value = (cert.san_names || []).join(',');
+            document.getElementById('cert-key-type').value = cert.key_type;
+            document.getElementById('cert-mode').value = cert.certificate_mode;
+            document.getElementById('cert-portal-tag').value = cert.portal_group_tag;
+            document.getElementById('cert-threshold').value = cert.renewal_threshold_days;
+            document.getElementById('cert-enabled').value = cert.enabled ? 'true' : 'false';
+            if (title) title.textContent = 'Edit Certificate';
+
+            panel.style.display = 'block';
+            panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+            const assignedIds = cert.nodes.map(n => n.id);
+            await this._loadNodeCheckboxes(assignedIds);
+        } catch (err) { Toast.error('Failed to load certificate: ' + err.message); }
+    },
+
+    async _loadNodeCheckboxes(selectedIds) {
+        const container = document.getElementById('cert-node-checkboxes');
+        if (!container) return;
+        try {
+            const nodes = await api.getNodes();
+            if (!nodes.length) {
+                container.innerHTML = '<span style="color:var(--text-muted); font-size:0.875rem">No nodes configured.</span>';
+                return;
+            }
+            container.innerHTML = nodes.map(node => `
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.875rem; cursor:pointer">
+                    <input type="checkbox" class="cert-node-cb" value="${node.id}" ${selectedIds.includes(node.id) ? 'checked' : ''}>
+                    ${node.name} <span class="badge ${node.is_primary ? 'success' : 'neutral'}" style="font-size:0.7rem">${node.is_primary ? 'PRIMARY' : node.role}</span>
+                </label>`).join('');
+        } catch (err) {
+            container.innerHTML = '<span style="color:var(--danger); font-size:0.875rem">Failed to load nodes.</span>';
+        }
+    },
+
+    hideCertForm() {
+        const panel = document.getElementById('cert-form-panel');
+        if (panel) panel.style.display = 'none';
+    },
+
+    async saveManagedCert() {
+        try {
+            const id = document.getElementById('cert-form-id').value;
+            const sanInput = document.getElementById('cert-san').value;
+            const nodeIds = Array.from(document.querySelectorAll('.cert-node-cb:checked')).map(cb => parseInt(cb.value));
+
+            const data = {
+                common_name: document.getElementById('cert-cn').value,
+                san_names: sanInput ? sanInput.split(',').map(s => s.trim()).filter(Boolean) : [],
+                key_type: document.getElementById('cert-key-type').value,
+                certificate_mode: document.getElementById('cert-mode').value,
+                portal_group_tag: document.getElementById('cert-portal-tag').value,
+                renewal_threshold_days: parseInt(document.getElementById('cert-threshold').value),
+                enabled: document.getElementById('cert-enabled').value === 'true',
+                node_ids: nodeIds,
+            };
+
+            if (!data.common_name) { Toast.warning('Please enter a Common Name'); return; }
+
+            if (id) {
+                await api.updateManagedCertificate(parseInt(id), data);
+                Toast.success('Certificate updated');
+            } else {
+                await api.createManagedCertificate(data);
+                Toast.success('Certificate added');
+            }
+
+            this.hideCertForm();
+            this.loadManagedCerts();
+        } catch (err) { Toast.error('Failed to save: ' + err.message); }
+    },
+
+    async deleteManagedCert(id, cn) {
+        if (!confirm(`Delete managed certificate "${cn}"? This cannot be undone.`)) return;
+        try {
+            await api.deleteManagedCertificate(id);
+            Toast.success(`Certificate "${cn}" deleted`);
+            this.loadManagedCerts();
+        } catch (err) { Toast.error('Failed to delete: ' + err.message); }
+    },
 };

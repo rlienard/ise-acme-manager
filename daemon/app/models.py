@@ -240,3 +240,48 @@ class HealthResponse(BaseModel):
 class MessageResponse(BaseModel):
     message: str
     success: bool = True
+
+
+# ──────────────────────────────────────
+# Managed Certificate Models
+# ──────────────────────────────────────
+
+class ManagedCertificateCreate(BaseModel):
+    common_name: str = Field(..., description="Certificate Common Name")
+    san_names: List[str] = Field(default_factory=list)
+    key_type: str = Field("RSA_2048")
+    portal_group_tag: str = Field("Default Portal Certificate Group")
+    certificate_mode: CertificateMode = Field(CertificateMode.SHARED)
+    renewal_threshold_days: int = Field(30)
+    enabled: bool = Field(True)
+    node_ids: List[int] = Field(default_factory=list, description="ISE node IDs to assign")
+
+
+class ManagedCertificateUpdate(BaseModel):
+    common_name: Optional[str] = None
+    san_names: Optional[List[str]] = None
+    key_type: Optional[str] = None
+    portal_group_tag: Optional[str] = None
+    certificate_mode: Optional[CertificateMode] = None
+    renewal_threshold_days: Optional[int] = None
+    enabled: Optional[bool] = None
+    node_ids: Optional[List[int]] = None
+
+
+class ManagedCertificateResponse(BaseModel):
+    id: int
+    common_name: str
+    san_names: List[str] = []
+    key_type: str
+    portal_group_tag: str
+    certificate_mode: str
+    renewal_threshold_days: int
+    enabled: bool
+    last_renewal_at: Optional[datetime] = None
+    last_renewal_status: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    nodes: List[ISENodeResponse] = []
+
+    class Config:
+        from_attributes = True

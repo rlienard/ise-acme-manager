@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .database import init_db
 from .scheduler import start_scheduler, stop_scheduler
-from .api import settings, status, history, actions, health
+from .api import settings, status, history, actions, health, certificates
 
 # Logging
 logging.basicConfig(
@@ -57,6 +57,7 @@ app.include_router(status.router)
 app.include_router(settings.router)
 app.include_router(history.router)
 app.include_router(actions.router)
+app.include_router(certificates.router)
 
 
 @app.get("/")

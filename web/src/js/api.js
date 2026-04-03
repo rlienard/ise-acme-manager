@@ -72,4 +72,10 @@ const api = {
 
     // Health
     getHealth() { return this.request('GET', '/health'); },
+
+    // Managed Certificates
+    getManagedCertificates() { return this.request('GET', '/api/v1/certificates'); },
+    createManagedCertificate(data) { return this.request('POST', '/api/v1/certificates', data); },
+    updateManagedCertificate(id, data) { return this.request('PUT', `/api/v1/certificates/${id}`, data); },
+    deleteManagedCertificate(id) { return this.request('DELETE', `/api/v1/certificates/${id}`); },
 };

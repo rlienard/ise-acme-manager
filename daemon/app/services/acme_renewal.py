@@ -1,18 +1,18 @@
 """
 ACME Certificate Renewal Orchestrator.
-Handles the full renewal lifecycle for shared and per-node modes.
+Handles the full renewal lifecycle for shared and per-node modes,
+iterating over ManagedCertificate rows for multi-certificate support.
 """
 
 import io
 import time
 import uuid
 import logging
-import subprocess
 from datetime import datetime, timedelta
 
 from ..database import (
     SessionLocal, RenewalHistory, DaemonStatus, ISENode,
-    RenewalStatus, DaemonState
+    ManagedCertificate, RenewalStatus, DaemonState
 )
 from ..config import ConfigManager
 from .ise_client import ISEClient
@@ -26,7 +26,7 @@ class ACMERenewalEngine:
     """Orchestrates certificate renewal across ISE nodes."""
 
     def run(self, trigger: str = "scheduled", mode_override: str = None, force: bool = False):
-        """Main entry point for a renewal run."""
+        """Main entry point — iterates over all enabled ManagedCertificate rows."""
         db = SessionLocal()
         run_id = str(uuid.uuid4())
         log_buffer = io.StringIO()
@@ -41,125 +41,157 @@ class ACMERenewalEngine:
             daemon_status.current_action = f"Renewal run {run_id[:8]}"
             db.commit()
 
-            # Load configuration
+            # Load global config (for ISE/DNS/SMTP credentials)
             config = ConfigManager.get_flat(db)
-            mode = mode_override or config.get("certificate_mode", "shared")
 
-            # Get enabled nodes
-            nodes = db.query(ISENode).filter(ISENode.enabled == True).all()
-            if not nodes:
-                raise Exception("No enabled ISE nodes configured")
-
-            # Create history record
-            history = RenewalHistory(
-                run_id=run_id,
-                status=RenewalStatus.IN_PROGRESS,
-                mode=mode,
-                trigger=trigger,
-                common_name=config.get("common_name", ""),
-                started_at=datetime.utcnow()
-            )
-            db.add(history)
-            db.commit()
-
-            # Initialize services
+            # Initialize shared services
             ise = ISEClient(config)
             dns = get_dns_provider(config)
             notifier = EmailNotifier(config)
 
-            # Determine renewal threshold
-            threshold = 9999 if force else config.get("renewal_threshold_days", 30)
+            # Fetch enabled managed certificates
+            managed_certs = (
+                db.query(ManagedCertificate)
+                .filter(ManagedCertificate.enabled == True)
+                .all()
+            )
 
-            # Execute renewal
-            if mode == "shared":
-                results = self._renew_shared(ise, dns, config, nodes, threshold, db)
+            if not managed_certs:
+                raise Exception("No enabled managed certificates configured")
+
+            all_results = {}
+            overall_statuses = []
+
+            for managed_cert in managed_certs:
+                cert_nodes = [n for n in managed_cert.nodes if n.enabled]
+                if not cert_nodes:
+                    logger.warning(f"Cert '{managed_cert.common_name}' has no enabled nodes — skipping")
+                    continue
+
+                # Build per-cert config overlay
+                cert_config = dict(config)
+                cert_config["common_name"] = managed_cert.common_name
+                cert_config["san_names"] = managed_cert.san_names or []
+                cert_config["key_type"] = managed_cert.key_type
+                cert_config["portal_group_tag"] = managed_cert.portal_group_tag
+                cert_config["certificate_mode"] = managed_cert.certificate_mode
+                cert_config["renewal_threshold_days"] = managed_cert.renewal_threshold_days
+
+                mode = mode_override or managed_cert.certificate_mode
+                threshold = 9999 if force else managed_cert.renewal_threshold_days
+
+                # Create history record for this cert
+                history = RenewalHistory(
+                    run_id=run_id,
+                    status=RenewalStatus.IN_PROGRESS,
+                    mode=mode,
+                    trigger=trigger,
+                    common_name=managed_cert.common_name,
+                    started_at=datetime.utcnow(),
+                    managed_certificate_id=managed_cert.id,
+                )
+                db.add(history)
+                db.commit()
+
+                try:
+                    if mode == "shared":
+                        results = self._renew_shared(ise, dns, cert_config, cert_nodes, threshold, db)
+                    else:
+                        results = self._renew_per_node(ise, dns, cert_config, cert_nodes, threshold, db)
+
+                    statuses = [r.get("status") for r in results.values()]
+                    if all(s in ("ok", "renewed") for s in statuses):
+                        cert_status = RenewalStatus.SUCCESS
+                    elif any(s == "renewed" for s in statuses):
+                        cert_status = RenewalStatus.PARTIAL
+                    elif all(s == "ok" for s in statuses):
+                        cert_status = RenewalStatus.SKIPPED
+                    else:
+                        cert_status = RenewalStatus.FAILED
+
+                except Exception as e:
+                    logger.error(f"Cert '{managed_cert.common_name}' renewal failed: {e}")
+                    results = {}
+                    cert_status = RenewalStatus.FAILED
+                    history.error_message = str(e)
+
+                # Update history record
+                history.status = cert_status
+                history.completed_at = datetime.utcnow()
+                history.duration_seconds = (history.completed_at - history.started_at).total_seconds()
+                history.node_results = results
+                history.log_output = log_buffer.getvalue()
+
+                # Update managed cert last renewal info
+                managed_cert.last_renewal_at = datetime.utcnow()
+                managed_cert.last_renewal_status = cert_status.value
+
+                # Update node statuses
+                for node in cert_nodes:
+                    node_result = results.get(node.name, {})
+                    node.last_cert_check = datetime.utcnow()
+                    if "days_remaining" in node_result:
+                        node.cert_days_remaining = node_result["days_remaining"]
+                    if "expiry_date" in node_result:
+                        try:
+                            node.cert_expiry_date = datetime.strptime(
+                                node_result["expiry_date"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                    node.cert_status = node_result.get("status", "unknown")
+
+                db.commit()
+
+                all_results[managed_cert.common_name] = results
+                overall_statuses.append(cert_status)
+
+                # Notify per cert
+                try:
+                    notifier.send_renewal_report(results, managed_cert.common_name, mode)
+                    history.notification_sent = True
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Notification failed for '{managed_cert.common_name}': {e}")
+
+            # Determine run-level overall status
+            if not overall_statuses:
+                run_overall = RenewalStatus.SKIPPED
+            elif all(s in (RenewalStatus.SUCCESS, RenewalStatus.SKIPPED) for s in overall_statuses):
+                run_overall = RenewalStatus.SUCCESS
+            elif any(s == RenewalStatus.FAILED for s in overall_statuses):
+                run_overall = RenewalStatus.PARTIAL
             else:
-                results = self._renew_per_node(ise, dns, config, nodes, threshold, db)
-
-            # Determine overall status
-            statuses = [r.get("status") for r in results.values()]
-            if all(s in ("ok", "renewed") for s in statuses):
-                overall_status = RenewalStatus.SUCCESS
-            elif any(s == "renewed" for s in statuses):
-                overall_status = RenewalStatus.PARTIAL
-            elif all(s == "ok" for s in statuses):
-                overall_status = RenewalStatus.SKIPPED
-            else:
-                overall_status = RenewalStatus.FAILED
-
-            # Update history
-            history.status = overall_status
-            history.completed_at = datetime.utcnow()
-            history.duration_seconds = (history.completed_at - history.started_at).total_seconds()
-            history.node_results = results
-            history.log_output = log_buffer.getvalue()
+                run_overall = RenewalStatus.SUCCESS
 
             # Update daemon status
             daemon_status.state = DaemonState.IDLE
             daemon_status.current_action = None
             daemon_status.last_run_at = datetime.utcnow()
-            daemon_status.last_run_status = overall_status.value
+            daemon_status.last_run_status = run_overall.value
             daemon_status.total_renewals += 1
-            if overall_status in (RenewalStatus.SUCCESS, RenewalStatus.SKIPPED):
+            if run_overall in (RenewalStatus.SUCCESS, RenewalStatus.SKIPPED):
                 daemon_status.successful_renewals += 1
             else:
                 daemon_status.failed_renewals += 1
 
-            # Update node statuses
-            for node in nodes:
-                node_result = results.get(node.name, {})
-                node.last_cert_check = datetime.utcnow()
-                if "days_remaining" in node_result:
-                    node.cert_days_remaining = node_result["days_remaining"]
-                if "expiry_date" in node_result:
-                    try:
-                        node.cert_expiry_date = datetime.strptime(
-                            node_result["expiry_date"], "%Y-%m-%dT%H:%M:%S.%fZ"
-                        )
-                    except (ValueError, TypeError):
-                        pass
-                node.cert_status = node_result.get("status", "unknown")
-
             db.commit()
 
-            # Send notification
-            try:
-                notifier.send_renewal_report(
-                    results, config.get("common_name", ""), mode
-                )
-                history.notification_sent = True
-                db.commit()
-            except Exception as e:
-                logger.error(f"Notification failed: {e}")
-
-            logger.info(f"Renewal run {run_id[:8]} completed: {overall_status.value}")
-            return {"run_id": run_id, "status": overall_status.value, "results": results}
+            logger.info(f"Renewal run {run_id[:8]} completed: {run_overall.value}")
+            return {"run_id": run_id, "status": run_overall.value, "results": all_results}
 
         except Exception as e:
             logger.error(f"Renewal run failed: {e}")
-
-            # Update records on failure
             try:
-                history = db.query(RenewalHistory).filter(
-                    RenewalHistory.run_id == run_id
-                ).first()
-                if history:
-                    history.status = RenewalStatus.FAILED
-                    history.completed_at = datetime.utcnow()
-                    history.error_message = str(e)
-                    history.log_output = log_buffer.getvalue()
-
                 daemon_status = db.query(DaemonStatus).first()
                 if daemon_status:
                     daemon_status.state = DaemonState.ERROR
                     daemon_status.current_action = None
                     daemon_status.last_error = str(e)
                     daemon_status.failed_renewals += 1
-
                 db.commit()
             except Exception:
                 pass
-
             raise
         finally:
             logger.removeHandler(handler)
@@ -172,7 +204,6 @@ class ACMERenewalEngine:
         cn = config.get("common_name", "")
         primary_name = None
 
-        # Find primary node
         for node in nodes:
             if node.is_primary:
                 primary_name = node.name
@@ -182,26 +213,18 @@ class ACMERenewalEngine:
 
         secondary_nodes = [n for n in nodes if n.name != primary_name]
 
-        # Check primary
         expiry = ise.check_certificate_expiry(cn, threshold, primary_name)
         if not expiry["needs_renewal"]:
             results[primary_name] = {"status": "ok", **expiry}
-            # Check secondaries
             for node in secondary_nodes:
                 sec_expiry = ise.check_certificate_expiry(cn, threshold, node.name)
                 if sec_expiry["needs_renewal"]:
-                    results[node.name] = self._distribute_cert(
-                        ise, config, cn, primary_name, node.name
-                    )
+                    results[node.name] = self._distribute_cert(ise, config, cn, primary_name, node.name)
                 else:
                     results[node.name] = {"status": "ok", **sec_expiry}
             return results
 
-        # Renew on primary
         dns_record_id = None
-        challenge_name = None
-        challenge_value = None
-
         try:
             req = ise.initiate_acme_certificate_request(
                 cn, config.get("san_names", []), config.get("key_type", "RSA_2048"),
@@ -237,12 +260,9 @@ class ACMERenewalEngine:
                 except Exception:
                     pass
 
-        # Distribute to secondaries
         if results.get(primary_name, {}).get("status") == "renewed":
             for node in secondary_nodes:
-                results[node.name] = self._distribute_cert(
-                    ise, config, cn, primary_name, node.name
-                )
+                results[node.name] = self._distribute_cert(ise, config, cn, primary_name, node.name)
 
         return results
 
@@ -251,8 +271,6 @@ class ACMERenewalEngine:
         results = {}
         cn = config.get("common_name", "")
         dns_record_id = None
-        challenge_name = None
-        challenge_value = None
         dns_created = False
 
         for node in nodes:

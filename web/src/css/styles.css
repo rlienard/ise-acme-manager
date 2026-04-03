@@ -476,6 +476,99 @@ tbody tr:last-child td {
     gap: 1rem;
 }
 
+/* ── Settings Sidebar Layout ── */
+.settings-layout {
+    display: flex;
+    gap: 1.5rem;
+    align-items: flex-start;
+}
+
+.settings-sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    position: sticky;
+    top: 80px;
+}
+
+.settings-sidebar__title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: 0 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+}
+
+.settings-sidebar__toggle {
+    display: none;
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 0.5rem;
+}
+
+.settings-nav {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.settings-nav__item a {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.15s;
+    cursor: pointer;
+}
+
+.settings-nav__item a:hover {
+    background: rgba(4, 159, 217, 0.08);
+    color: var(--text);
+}
+
+.settings-nav__item a.active {
+    background: rgba(4, 159, 217, 0.15);
+    color: var(--primary);
+}
+
+.settings-nav__item a i {
+    width: 16px;
+    text-align: center;
+    font-size: 0.85rem;
+}
+
+.settings-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.settings-panel {
+    display: none;
+}
+
+.settings-panel.active {
+    display: block;
+}
+
 /* ── Responsive ── */
 @media (max-width: 768px) {
     nav { padding: 0 1rem; }
@@ -483,4 +576,25 @@ tbody tr:last-child td {
     main { padding: 1rem; }
     .card-grid { grid-template-columns: 1fr; }
     .form-grid { grid-template-columns: 1fr; }
+
+    .settings-layout {
+        flex-direction: column;
+    }
+
+    .settings-sidebar {
+        width: 100%;
+        position: static;
+    }
+
+    .settings-sidebar__toggle {
+        display: flex;
+    }
+
+    .settings-nav {
+        display: none;
+    }
+
+    .settings-sidebar.open .settings-nav {
+        display: flex;
+    }
 }
