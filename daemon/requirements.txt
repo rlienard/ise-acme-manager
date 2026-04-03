@@ -14,3 +14,4 @@ python-multipart==0.0.6
 httpx==0.26.0
 aiofiles==23.2.1
 dnspython==2.6.1
+ovh==1.2.0

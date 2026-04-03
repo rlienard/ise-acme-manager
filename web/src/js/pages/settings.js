@@ -333,6 +333,7 @@ const Settings = {
                             <option value="cloudflare" ${s.dns?.dns_provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option>
                             <option value="aws_route53" ${s.dns?.dns_provider === 'aws_route53' ? 'selected' : ''}>AWS Route53</option>
                             <option value="azure_dns" ${s.dns?.dns_provider === 'azure_dns' ? 'selected' : ''}>Azure DNS</option>
+                            <option value="ovhcloud" ${s.dns?.dns_provider === 'ovhcloud' ? 'selected' : ''}>OVHcloud</option>
                         </select>
                     </div>
                     <div class="form-group dns-field dns-cloudflare">
@@ -362,6 +363,34 @@ const Settings = {
                     <div class="form-group dns-field dns-azure_dns" style="display:none">
                         <label>DNS Zone Name</label>
                         <input id="azure_dns_zone_name" value="${s.dns?.azure_dns_zone_name || ''}">
+                    </div>
+                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
+                        <label>API Endpoint</label>
+                        <select id="ovh_endpoint">
+                            <option value="ovh-eu" ${s.dns?.ovh_endpoint === 'ovh-eu' ? 'selected' : ''}>OVH Europe (ovh-eu)</option>
+                            <option value="ovh-us" ${s.dns?.ovh_endpoint === 'ovh-us' ? 'selected' : ''}>OVH US (ovh-us)</option>
+                            <option value="ovh-ca" ${s.dns?.ovh_endpoint === 'ovh-ca' ? 'selected' : ''}>OVH Canada (ovh-ca)</option>
+                            <option value="kimsufi-eu" ${s.dns?.ovh_endpoint === 'kimsufi-eu' ? 'selected' : ''}>Kimsufi Europe (kimsufi-eu)</option>
+                            <option value="kimsufi-ca" ${s.dns?.ovh_endpoint === 'kimsufi-ca' ? 'selected' : ''}>Kimsufi Canada (kimsufi-ca)</option>
+                            <option value="soyoustart-eu" ${s.dns?.ovh_endpoint === 'soyoustart-eu' ? 'selected' : ''}>So You Start Europe (soyoustart-eu)</option>
+                            <option value="soyoustart-ca" ${s.dns?.ovh_endpoint === 'soyoustart-ca' ? 'selected' : ''}>So You Start Canada (soyoustart-ca)</option>
+                        </select>
+                    </div>
+                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
+                        <label>Application Key</label>
+                        <input id="ovh_application_key" type="password" placeholder="Enter application key">
+                    </div>
+                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
+                        <label>Application Secret</label>
+                        <input id="ovh_application_secret" type="password" placeholder="Enter application secret">
+                    </div>
+                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
+                        <label>Consumer Key</label>
+                        <input id="ovh_consumer_key" type="password" placeholder="Enter consumer key">
+                    </div>
+                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
+                        <label>DNS Zone</label>
+                        <input id="ovh_dns_zone" value="${s.dns?.ovh_dns_zone || ''}" placeholder="example.com">
                     </div>
                 </div>
                 <div class="btn-group">
@@ -581,8 +610,16 @@ const Settings = {
                 azure_subscription_id: document.getElementById('azure_subscription_id')?.value || null,
                 azure_resource_group: document.getElementById('azure_resource_group')?.value || null,
                 azure_dns_zone_name: document.getElementById('azure_dns_zone_name')?.value || null,
+                ovh_endpoint: document.getElementById('ovh_endpoint')?.value || 'ovh-eu',
+                ovh_application_key: document.getElementById('ovh_application_key')?.value || null,
+                ovh_application_secret: document.getElementById('ovh_application_secret')?.value || null,
+                ovh_consumer_key: document.getElementById('ovh_consumer_key')?.value || null,
+                ovh_dns_zone: document.getElementById('ovh_dns_zone')?.value || null,
             };
             if (!data.cloudflare_api_token) delete data.cloudflare_api_token;
+            if (!data.ovh_application_key) delete data.ovh_application_key;
+            if (!data.ovh_application_secret) delete data.ovh_application_secret;
+            if (!data.ovh_consumer_key) delete data.ovh_consumer_key;
             await api.updateDNS(data);
             Toast.success('DNS settings saved');
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
