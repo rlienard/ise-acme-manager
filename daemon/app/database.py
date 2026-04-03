@@ -259,6 +259,11 @@ def _seed_default_settings(db):
         ("azure_subscription_id", "", "string", "dns", "Azure Subscription ID", False),
         ("azure_resource_group", "", "string", "dns", "Azure Resource Group", False),
         ("azure_dns_zone_name", "", "string", "dns", "Azure DNS Zone Name", False),
+        ("ovh_endpoint", "ovh-eu", "string", "dns", "OVHcloud API endpoint", False),
+        ("ovh_application_key", "", "string", "dns", "OVHcloud Application Key", True),
+        ("ovh_application_secret", "", "string", "dns", "OVHcloud Application Secret", True),
+        ("ovh_consumer_key", "", "string", "dns", "OVHcloud Consumer Key", True),
+        ("ovh_dns_zone", "", "string", "dns", "OVHcloud DNS Zone", False),
 
         # SMTP Settings
         ("smtp_server", "", "string", "smtp", "SMTP server hostname", False),

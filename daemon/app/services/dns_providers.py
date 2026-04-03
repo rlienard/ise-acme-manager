@@ -112,6 +112,44 @@ class AzureDNS:
             return {"success": False, "message": str(e)}
 
 
+class OVHCloudDNS:
+    def __init__(self, config: dict):
+        import ovh
+        self.client = ovh.Client(
+            endpoint=config.get("ovh_endpoint", "ovh-eu"),
+            application_key=config.get("ovh_application_key", ""),
+            application_secret=config.get("ovh_application_secret", ""),
+            consumer_key=config.get("ovh_consumer_key", ""),
+        )
+        self.zone_name = config.get("ovh_dns_zone", "")
+
+    def create_txt_record(self, name: str, value: str, ttl: int = 120) -> str:
+        relative = name.replace(f".{self.zone_name}", "").rstrip(".")
+        result = self.client.post(
+            f"/domain/zone/{self.zone_name}/record",
+            fieldType="TXT",
+            subDomain=relative,
+            target=value,
+            ttl=ttl,
+        )
+        record_id = str(result["id"])
+        self.client.post(f"/domain/zone/{self.zone_name}/refresh")
+        logger.info(f"DNS TXT created: {name} (ID: {record_id})")
+        return record_id
+
+    def delete_txt_record(self, record_id: str, **kwargs):
+        self.client.delete(f"/domain/zone/{self.zone_name}/record/{record_id}")
+        self.client.post(f"/domain/zone/{self.zone_name}/refresh")
+        logger.info(f"DNS TXT deleted: {record_id}")
+
+    def test_connection(self) -> dict:
+        try:
+            zone_info = self.client.get(f"/domain/zone/{self.zone_name}")
+            return {"success": True, "message": f"Connected to OVHcloud zone: {zone_info.get('name', self.zone_name)}"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+
 def get_dns_provider(config: dict):
     """Factory function to create the appropriate DNS provider."""
     provider = config.get("dns_provider", "cloudflare").lower()
@@ -121,5 +159,7 @@ def get_dns_provider(config: dict):
         return AWSRoute53DNS(config)
     elif provider == "azure_dns":
         return AzureDNS(config)
+    elif provider == "ovhcloud":
+        return OVHCloudDNS(config)
     else:
         raise ValueError(f"Unsupported DNS provider: {provider}")

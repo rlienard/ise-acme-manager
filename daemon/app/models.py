@@ -26,6 +26,7 @@ class DNSProvider(str, Enum):
     CLOUDFLARE = "cloudflare"
     AWS_ROUTE53 = "aws_route53"
     AZURE_DNS = "azure_dns"
+    OVHCLOUD = "ovhcloud"
 
 
 class ActionType(str, Enum):
@@ -85,6 +86,11 @@ class DNSSettings(BaseModel):
     azure_subscription_id: Optional[str] = Field(None, description="Azure Subscription ID")
     azure_resource_group: Optional[str] = Field(None, description="Azure Resource Group")
     azure_dns_zone_name: Optional[str] = Field(None, description="Azure DNS Zone Name")
+    ovh_endpoint: Optional[str] = Field("ovh-eu", description="OVHcloud API endpoint")
+    ovh_application_key: Optional[str] = Field(None, description="OVHcloud Application Key")
+    ovh_application_secret: Optional[str] = Field(None, description="OVHcloud Application Secret")
+    ovh_consumer_key: Optional[str] = Field(None, description="OVHcloud Consumer Key")
+    ovh_dns_zone: Optional[str] = Field(None, description="OVHcloud DNS Zone")
 
 
 class SMTPSettings(BaseModel):
