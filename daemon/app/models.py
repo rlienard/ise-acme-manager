@@ -45,7 +45,6 @@ class ISESettings(BaseModel):
     ise_password: str = Field(..., description="ISE admin password")
     ise_ers_port: int = Field(9060, description="ISE ERS API port")
     ise_open_api_port: int = Field(443, description="ISE Open API port")
-    ise_dns_server: Optional[str] = Field(None, description="Custom DNS server IP for ISE FQDN resolution (leave empty for system default)")
 
 
 class ACMESettings(BaseModel):

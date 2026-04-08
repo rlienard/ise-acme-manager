@@ -29,6 +29,7 @@ const api = {
 
     // Settings
     getSettings() { return this.request('GET', '/api/v1/settings'); },
+    getSystemInfo() { return this.request('GET', '/api/v1/settings/system'); },
     updateISE(data) { return this.request('PUT', '/api/v1/settings/ise', data); },
     updateACME(data) { return this.request('PUT', '/api/v1/settings/acme', data); },
     updateCertificate(data) { return this.request('PUT', '/api/v1/settings/certificate', data); },

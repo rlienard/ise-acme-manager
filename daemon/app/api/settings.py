@@ -2,6 +2,7 @@
 Settings API endpoints.
 """
 
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,14 @@ router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 def get_all_settings(db: Session = Depends(get_db)):
     """Get all settings (secrets masked)."""
     return ConfigManager.get_safe(db)
+
+
+@router.get("/system", response_model=dict)
+def get_system_settings():
+    """Get system-level settings derived from the container environment."""
+    return {
+        "custom_dns_server": os.environ.get("CUSTOM_DNS_SERVER", "")
+    }
 
 
 @router.put("/ise", response_model=MessageResponse)

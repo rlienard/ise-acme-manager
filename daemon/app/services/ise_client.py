@@ -11,24 +11,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
 
 
-def _resolve_with_custom_dns(hostname: str, dns_server: str) -> str:
-    """Resolve a hostname using a specific DNS server. Returns the IP address,
-    or the original hostname if resolution fails (fallback to system DNS)."""
-    try:
-        import dns.resolver
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = [dns_server]
-        resolver.timeout = 5
-        resolver.lifetime = 5
-        answers = resolver.resolve(hostname, 'A')
-        resolved = str(answers[0])
-        logger.info(f"Resolved {hostname} → {resolved} via DNS server {dns_server}")
-        return resolved
-    except Exception as e:
-        logger.warning(f"Custom DNS resolution failed for {hostname} using {dns_server}: {e}. Falling back to system DNS.")
-        return hostname
-
-
 class ISEClient:
     """Handles all Cisco ISE API interactions."""
 
@@ -38,18 +20,9 @@ class ISEClient:
         self.password = config.get("ise_password", "")
         self.open_api_port = config.get("ise_open_api_port", 443)
         self.ers_port = config.get("ise_ers_port", 9060)
-        self.dns_server = config.get("ise_dns_server", "") or ""
 
-        # If a custom DNS server is configured, resolve the ISE FQDN using it.
-        # The resolved IP is used in the URL while the original hostname is kept
-        # in the Host header so ISE can identify the virtual host correctly.
-        if self.dns_server and self.host:
-            resolved = _resolve_with_custom_dns(self.host, self.dns_server)
-            self.base_url = f"https://{resolved}:{self.open_api_port}/api/v1"
-            self.ers_base_url = f"https://{resolved}:{self.ers_port}/ers/config"
-        else:
-            self.base_url = f"https://{self.host}:{self.open_api_port}/api/v1"
-            self.ers_base_url = f"https://{self.host}:{self.ers_port}/ers/config"
+        self.base_url = f"https://{self.host}:{self.open_api_port}/api/v1"
+        self.ers_base_url = f"https://{self.host}:{self.ers_port}/ers/config"
 
         self.session = requests.Session()
         self.session.auth = (self.username, self.password)
@@ -66,10 +39,6 @@ class ISEClient:
             "Content-Type": "application/json",
             "Accept": "application/json"
         })
-
-        if self.dns_server and self.host:
-            self.session.headers.update({"Host": self.host})
-            self.ers_session.headers.update({"Host": self.host})
 
     def test_connection(self) -> dict:
         """Test connectivity to ISE."""

@@ -65,6 +65,18 @@ const Settings = {
         this.toggleDNSFields();
         this.loadNodes();
         this.loadManagedCerts();
+        this.loadSystemInfo();
+    },
+
+    async loadSystemInfo() {
+        try {
+            const info = await api.getSystemInfo();
+            const el = document.getElementById('container_dns_server');
+            if (el) el.value = info.custom_dns_server || 'Not configured (using Docker default DNS)';
+        } catch (err) {
+            const el = document.getElementById('container_dns_server');
+            if (el) el.value = 'Unable to retrieve';
+        }
     },
 
     showSection(id) {
@@ -494,18 +506,13 @@ const Settings = {
 
                 <div class="form-grid">
                     <div class="form-group">
-                        <label>ISE FQDN DNS Override <small style="color:var(--text-muted)">(optional — app-level, no restart needed)</small></label>
-                        <input id="ise_dns_server" value="${s.ise?.ise_dns_server || ''}" placeholder="e.g. 192.168.1.53 (leave empty for system default)">
+                        <label>Global Container DNS Server <small style="color:var(--text-muted)">(read-only — set via <code>CUSTOM_DNS_SERVER</code> in <code>.env</code>)</small></label>
+                        <input id="container_dns_server" readonly value="Loading…" style="background:var(--bg-secondary);cursor:default;color:var(--text-muted)">
                         <small style="color:var(--text-muted);margin-top:0.25rem;display:block">
-                            Resolves the ISE hostname using this DNS server inside the application only.
-                            Does not affect other processes in the container.
+                            Reflects the <code>CUSTOM_DNS_SERVER</code> environment variable active in the container.
+                            A container restart is required for changes to take effect.
                         </small>
                     </div>
-                </div>
-                <div class="btn-group">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.saveSystem()">
-                        <i class="fas fa-save"></i> Save System Settings
-                    </button>
                 </div>
             </div>
         </div>`;
@@ -666,16 +673,6 @@ const Settings = {
             };
             await api.updateScheduler(data);
             Toast.success('Scheduler settings saved and applied');
-        } catch (err) { Toast.error('Failed to save: ' + err.message); }
-    },
-
-    async saveSystem() {
-        try {
-            const data = {
-                ise_dns_server: document.getElementById('ise_dns_server').value || null,
-            };
-            await api.updateISE(data);
-            Toast.success('System settings saved');
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
     },
 
