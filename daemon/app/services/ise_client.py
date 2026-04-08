@@ -198,9 +198,16 @@ class ISEClient:
         roles = []
         if node_detail.get("papNode", False):
             roles.append("PAN")
-        services = node_detail.get("services", {})
-        if isinstance(services, dict):
+        services = node_detail.get("services", [])
+        if isinstance(services, str):
+            service_keys = [s.strip().lower() for s in services.split(",") if s.strip()]
+        elif isinstance(services, list):
+            service_keys = [s.lower() for s in services if isinstance(s, str)]
+        elif isinstance(services, dict):
             service_keys = [k.lower() for k in services.keys()]
+        else:
+            service_keys = []
+        if service_keys:
             psn_indicators = ["session", "profiler", "deviceadmin", "sxp"]
             if any(ind in sk for sk in service_keys for ind in psn_indicators):
                 roles.append("PSN")
