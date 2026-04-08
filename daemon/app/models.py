@@ -22,7 +22,7 @@ class ACMEProviderType(str, Enum):
     LETSENCRYPT = "letsencrypt"
 
 
-class DNSProvider(str, Enum):
+class DNSProviderType(str, Enum):
     CLOUDFLARE = "cloudflare"
     AWS_ROUTE53 = "aws_route53"
     AZURE_DNS = "azure_dns"
@@ -78,6 +78,7 @@ class ACMEProviderCreate(BaseModel):
     hmac_key: Optional[str] = Field(None, description="HMAC key (DigiCert)")
     account_email: Optional[str] = Field(None, description="Account email (LetsEncrypt)")
     account_key: Optional[str] = Field(None, description="Account private key PEM (LetsEncrypt)")
+    dns_provider_id: Optional[int] = Field(None, description="DNS provider used for DNS-01 challenge")
 
 
 class ACMEProviderUpdate(BaseModel):
@@ -88,6 +89,7 @@ class ACMEProviderUpdate(BaseModel):
     hmac_key: Optional[str] = None
     account_email: Optional[str] = None
     account_key: Optional[str] = None
+    dns_provider_id: Optional[int] = None
 
 
 class ACMEProviderResponse(BaseModel):
@@ -99,6 +101,32 @@ class ACMEProviderResponse(BaseModel):
     hmac_key: Optional[str] = None
     account_email: Optional[str] = None
     has_account_key: bool = False
+    dns_provider_id: Optional[int] = None
+    dns_provider_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DNSProviderCreate(BaseModel):
+    name: str = Field(..., description="User-friendly label (unique)")
+    provider_type: DNSProviderType = Field(..., description="DNS provider type")
+    config: Dict[str, Any] = Field(default_factory=dict, description="Provider-specific configuration values")
+
+
+class DNSProviderUpdate(BaseModel):
+    name: Optional[str] = None
+    provider_type: Optional[DNSProviderType] = None
+    config: Optional[Dict[str, Any]] = None
+
+
+class DNSProviderResponse(BaseModel):
+    id: int
+    name: str
+    provider_type: str
+    config: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -122,7 +150,7 @@ class CertificateSettings(BaseModel):
 
 
 class DNSSettings(BaseModel):
-    dns_provider: DNSProvider = Field(DNSProvider.CLOUDFLARE, description="DNS provider")
+    dns_provider: DNSProviderType = Field(DNSProviderType.CLOUDFLARE, description="DNS provider")
     cloudflare_api_token: Optional[str] = Field(None, description="Cloudflare API token")
     cloudflare_zone_id: Optional[str] = Field(None, description="Cloudflare Zone ID")
     aws_hosted_zone_id: Optional[str] = Field(None, description="AWS Route53 Hosted Zone ID")

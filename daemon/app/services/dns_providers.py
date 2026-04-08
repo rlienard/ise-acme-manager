@@ -2,10 +2,19 @@
 DNS Provider clients for ACME DNS-01 challenge automation.
 """
 
+import json
 import logging
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Configuration keys that should never be returned to the client in plaintext.
+DNS_SECRET_KEYS = {
+    "cloudflare_api_token",
+    "ovh_application_key",
+    "ovh_application_secret",
+    "ovh_consumer_key",
+}
 
 
 class CloudflareDNS:
@@ -163,3 +172,17 @@ def get_dns_provider(config: dict):
         return OVHCloudDNS(config)
     else:
         raise ValueError(f"Unsupported DNS provider: {provider}")
+
+
+def build_dns_client(provider_row):
+    """Build a DNS client from a DNSProvider DB row.
+
+    The row stores its provider-specific configuration as JSON in `config_json`.
+    We merge it with the provider type and hand it to the existing factory.
+    """
+    try:
+        config = json.loads(provider_row.config_json or "{}") or {}
+    except (ValueError, TypeError):
+        config = {}
+    config["dns_provider"] = provider_row.provider_type
+    return get_dns_provider(config)

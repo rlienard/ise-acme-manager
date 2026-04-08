@@ -87,4 +87,12 @@ const api = {
     createACMEProvider(data) { return this.request('POST', '/api/v1/acme-providers', data); },
     updateACMEProvider(id, data) { return this.request('PUT', `/api/v1/acme-providers/${id}`, data); },
     deleteACMEProvider(id) { return this.request('DELETE', `/api/v1/acme-providers/${id}`); },
+
+    // DNS Providers
+    getDNSProviders() { return this.request('GET', '/api/v1/dns-providers'); },
+    getDNSProvider(id) { return this.request('GET', `/api/v1/dns-providers/${id}`); },
+    createDNSProvider(data) { return this.request('POST', '/api/v1/dns-providers', data); },
+    updateDNSProvider(id, data) { return this.request('PUT', `/api/v1/dns-providers/${id}`, data); },
+    deleteDNSProvider(id) { return this.request('DELETE', `/api/v1/dns-providers/${id}`); },
+    testDNSProvider(id) { return this.request('POST', `/api/v1/dns-providers/${id}/test`); },
 };

@@ -16,7 +16,7 @@ from ..database import (
 )
 from ..config import ConfigManager
 from .ise_client import ISEClient
-from .dns_providers import get_dns_provider
+from .dns_providers import get_dns_provider, build_dns_client
 from .notifier import EmailNotifier
 from .acme_client import ACMEv2Client
 
@@ -45,9 +45,15 @@ class ACMERenewalEngine:
             # Load global config (for ISE/DNS/SMTP credentials)
             config = ConfigManager.get_flat(db)
 
-            # Initialize shared services
+            # Initialize shared services. The DNS client is resolved per
+            # certificate (from the linked ACME provider) further down — we
+            # only build a global fallback here for legacy configurations
+            # that don't yet have a DNSProvider row attached.
             ise = ISEClient(config)
-            dns = get_dns_provider(config)
+            try:
+                fallback_dns = get_dns_provider(config)
+            except Exception:
+                fallback_dns = None
             notifier = EmailNotifier(config)
             legacy_acme_provider = config.get("acme_provider", "digicert")
 
@@ -88,6 +94,26 @@ class ACMERenewalEngine:
                 else:
                     acme_provider = legacy_acme_provider
                     provider_overlay = {}
+
+                # Resolve the DNS provider linked to this ACME provider. Each
+                # ACME provider can target a different DNS zone/account, so we
+                # build a fresh DNS client per cert.
+                dns = None
+                if provider_row is not None and provider_row.dns_provider is not None:
+                    try:
+                        dns = build_dns_client(provider_row.dns_provider)
+                    except Exception as e:
+                        logger.error(
+                            f"Cert '{managed_cert.common_name}': failed to build DNS client "
+                            f"from provider '{provider_row.dns_provider.name}': {e}"
+                        )
+                if dns is None:
+                    dns = fallback_dns
+                if dns is None:
+                    logger.error(
+                        f"Cert '{managed_cert.common_name}': no DNS provider configured — skipping"
+                    )
+                    continue
 
                 # Build per-cert config overlay
                 cert_config = dict(config)

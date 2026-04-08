@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
-from ..database import get_db, ACMEProvider, ManagedCertificate
+from ..database import get_db, ACMEProvider, ManagedCertificate, DNSProvider
 from ..models import (
     ACMEProviderCreate,
     ACMEProviderUpdate,
@@ -28,6 +28,8 @@ def _to_response(provider: ACMEProvider) -> dict:
         "hmac_key": provider.hmac_key,
         "account_email": provider.account_email,
         "has_account_key": bool(provider.account_key),
+        "dns_provider_id": provider.dns_provider_id,
+        "dns_provider_name": provider.dns_provider.name if provider.dns_provider else None,
         "created_at": provider.created_at,
         "updated_at": provider.updated_at,
     }
@@ -38,6 +40,14 @@ def _get_or_404(provider_id: int, db: Session) -> ACMEProvider:
     if not provider:
         raise HTTPException(status_code=404, detail="ACME provider not found")
     return provider
+
+
+def _validate_dns_provider(dns_provider_id, db: Session):
+    if dns_provider_id is None:
+        return
+    exists = db.query(DNSProvider).filter(DNSProvider.id == dns_provider_id).first()
+    if not exists:
+        raise HTTPException(status_code=400, detail=f"DNS provider id {dns_provider_id} not found")
 
 
 @router.get("", response_model=List[ACMEProviderResponse])
@@ -57,6 +67,8 @@ def create_provider(data: ACMEProviderCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=409, detail=f"Provider with name '{data.name}' already exists")
 
+    _validate_dns_provider(data.dns_provider_id, db)
+
     provider = ACMEProvider(
         name=data.name,
         provider_type=data.provider_type.value,
@@ -65,6 +77,7 @@ def create_provider(data: ACMEProviderCreate, db: Session = Depends(get_db)):
         hmac_key=data.hmac_key or None,
         account_email=data.account_email or None,
         account_key=data.account_key or None,
+        dns_provider_id=data.dns_provider_id,
     )
     db.add(provider)
     db.commit()
@@ -97,6 +110,9 @@ def update_provider(provider_id: int, data: ACMEProviderUpdate, db: Session = De
         provider.account_email = data.account_email or None
     if data.account_key is not None and data.account_key != "":
         provider.account_key = data.account_key
+    if data.dns_provider_id is not None:
+        _validate_dns_provider(data.dns_provider_id, db)
+        provider.dns_provider_id = data.dns_provider_id
 
     db.commit()
     db.refresh(provider)
