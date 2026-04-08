@@ -7,7 +7,8 @@ import os
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Boolean,
-    DateTime, Float, JSON, Enum as SQLEnum, ForeignKey, Table
+    DateTime, Float, JSON, Enum as SQLEnum, ForeignKey, Table,
+    inspect, text
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -84,6 +85,22 @@ certificate_node_assignments = Table(
 )
 
 
+class ACMEProvider(Base):
+    """ACME provider configuration — multiple providers supported for per-cert selection."""
+    __tablename__ = "acme_providers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)  # user-friendly label
+    provider_type = Column(String(50), nullable=False)  # 'digicert' or 'letsencrypt'
+    directory_url = Column(String(512), nullable=False)
+    kid = Column(Text, nullable=True)          # DigiCert Key ID
+    hmac_key = Column(Text, nullable=True)     # DigiCert HMAC key
+    account_email = Column(String(255), nullable=True)  # LetsEncrypt
+    account_key = Column(Text, nullable=True)  # LetsEncrypt account PEM
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ManagedCertificate(Base):
     """Multi-certificate management — each row is an independently managed cert."""
     __tablename__ = "managed_certificates"
@@ -96,11 +113,13 @@ class ManagedCertificate(Base):
     certificate_mode = Column(String(20), default="shared")  # shared / per-node
     renewal_threshold_days = Column(Integer, default=30)
     enabled = Column(Boolean, default=True)
+    acme_provider_id = Column(Integer, ForeignKey("acme_providers.id", ondelete="SET NULL"), nullable=True)
     last_renewal_at = Column(DateTime, nullable=True)
     last_renewal_status = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     nodes = relationship("ISENode", secondary=certificate_node_assignments, backref="managed_certificates")
+    acme_provider = relationship("ACMEProvider")
 
 
 class RenewalHistory(Base):
@@ -153,6 +172,9 @@ def init_db():
     os.makedirs(DATABASE_DIR, exist_ok=True)
     Base.metadata.create_all(bind=engine)
 
+    # Add new columns to existing tables (lightweight migration)
+    _migrate_add_columns()
+
     db = SessionLocal()
     try:
         # Initialize daemon status if not exists
@@ -173,8 +195,66 @@ def init_db():
         # Migrate legacy single-cert config to managed certificates
         _migrate_single_cert_to_managed(db)
 
+        # Migrate legacy global ACME settings to an ACMEProvider row
+        _migrate_legacy_acme_provider(db)
+
     finally:
         db.close()
+
+
+def _migrate_add_columns():
+    """Add newly-introduced columns to existing tables (idempotent)."""
+    inspector = inspect(engine)
+    if "managed_certificates" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("managed_certificates")}
+        if "acme_provider_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE managed_certificates ADD COLUMN acme_provider_id INTEGER"
+                ))
+
+
+def _migrate_legacy_acme_provider(db):
+    """Create a default ACMEProvider row from legacy settings, assign to existing certs."""
+    if db.query(ACMEProvider).count() > 0:
+        return
+
+    def _get(key, default=None):
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row or row.value is None:
+            return default
+        return row.value
+
+    provider_type = _get("acme_provider", "digicert") or "digicert"
+    directory_url = _get("acme_directory_url") or (
+        "https://acme.digicert.com/v2/acme/directory/"
+        if provider_type == "digicert"
+        else "https://acme-api.letsencrypt.org/directory"
+    )
+    name = "DigiCert (default)" if provider_type == "digicert" else "Let's Encrypt (default)"
+
+    provider = ACMEProvider(
+        name=name,
+        provider_type=provider_type,
+        directory_url=directory_url,
+        kid=_get("acme_kid") or None,
+        hmac_key=_get("acme_hmac_key") or None,
+        account_email=_get("acme_account_email") or None,
+        account_key=_get("acme_account_key") or None,
+    )
+    db.add(provider)
+    db.flush()
+
+    # Assign to any existing managed certificates that have no provider
+    existing_certs = (
+        db.query(ManagedCertificate)
+        .filter(ManagedCertificate.acme_provider_id.is_(None))
+        .all()
+    )
+    for cert in existing_certs:
+        cert.acme_provider_id = provider.id
+
+    db.commit()
 
 
 def _migrate_single_cert_to_managed(db):

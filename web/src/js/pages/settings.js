@@ -6,6 +6,9 @@ const Settings = {
     currentSettings: {},
     _activeSection: 'ise',
     _discoveredNodes: [],
+    _acmeProviders: [],
+    _portalGroupTags: [],
+    _iseCertsCache: [],
 
     _sections: [
         { id: 'ise',           icon: 'fa-server',    label: 'ISE Connector'    },
@@ -61,9 +64,10 @@ const Settings = {
 
     afterRender() {
         this.showSection(this._activeSection || 'ise');
-        this.toggleACMEFields();
+        this.toggleACMEProviderFormFields();
         this.toggleDNSFields();
         this.loadNodes();
+        this.loadACMEProviders();
         this.loadManagedCerts();
         this.loadSystemInfo();
     },
@@ -194,45 +198,69 @@ const Settings = {
     },
 
     renderACMESection(s) {
-        const provider = s.acme?.acme_provider || 'digicert';
         return `
         <div id="panel-acme" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-certificate"></i> ACME Provider</h2>
-                <div class="form-grid">
-                    <div class="form-group">
-                        <label>Provider</label>
-                        <select id="acme_provider" onchange="Settings.toggleACMEFields()">
-                            <option value="digicert" ${provider === 'digicert' ? 'selected' : ''}>DigiCert</option>
-                            <option value="letsencrypt" ${provider === 'letsencrypt' ? 'selected' : ''}>Let's Encrypt</option>
-                        </select>
-                    </div>
-                    <div class="form-group acme-field acme-digicert" style="grid-column: span 2">
-                        <label>ACME Directory URL</label>
-                        <input id="acme_directory_url" value="${s.acme?.acme_directory_url || 'https://acme.digicert.com/v2/acme/directory/'}">
-                    </div>
-                    <div class="form-group acme-field acme-digicert">
-                        <label>Key ID (KID)</label>
-                        <input id="acme_kid" type="password" value="" placeholder="Enter KID">
-                    </div>
-                    <div class="form-group acme-field acme-digicert">
-                        <label>HMAC Key</label>
-                        <input id="acme_hmac_key" type="password" value="" placeholder="Enter HMAC key">
-                    </div>
-                    <div class="form-group acme-field acme-letsencrypt" style="display:none">
-                        <label>Account Email</label>
-                        <input id="acme_account_email" value="${s.acme?.acme_account_email || ''}" placeholder="admin@yourdomain.com">
-                    </div>
-                    <div class="form-group acme-field acme-letsencrypt" style="display:none; grid-column: span 2">
-                        <label>ACME Directory URL</label>
-                        <input id="acme_directory_url_le" value="${provider === 'letsencrypt' ? (s.acme?.acme_directory_url || 'https://acme-api.letsencrypt.org/directory') : 'https://acme-api.letsencrypt.org/directory'}">
-                        <small style="color:var(--text-muted); font-size:0.75rem; margin-top:4px; display:block">Use https://acme-staging-v02.api.letsencrypt.org/directory for testing</small>
-                    </div>
-                </div>
-                <div class="btn-group">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.saveACME()">
-                        <i class="fas fa-save"></i> Save ACME Settings
+                <h2><i class="fas fa-certificate"></i> ACME Providers</h2>
+                <p style="color:var(--text-muted); font-size:0.875rem; margin-top:-0.5rem">
+                    Configure one or more ACME providers. Each managed certificate can be
+                    renewed through a different provider.
+                </p>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem">
+                    <h3 style="font-size:0.95rem; color:var(--text-muted); margin:0">Configured Providers</h3>
+                    <button class="btn btn-primary btn-sm" onclick="Settings.showACMEProviderForm()">
+                        <i class="fas fa-plus"></i> Add Provider
                     </button>
+                </div>
+                <div id="acme-providers-table">
+                    <p style="color:var(--text-muted); font-size:0.875rem">Loading...</p>
+                </div>
+
+                <!-- Add/Edit Provider Form (hidden by default) -->
+                <div id="acme-provider-form-panel" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.25rem">
+                    <h3 style="font-size:0.95rem; margin-bottom:1rem" id="acme-provider-form-title">Add ACME Provider</h3>
+                    <input type="hidden" id="acme-provider-form-id">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Name (unique label)</label>
+                            <input id="acme-provider-name" placeholder="e.g. Production DigiCert">
+                        </div>
+                        <div class="form-group">
+                            <label>Provider Type</label>
+                            <select id="acme-provider-type" onchange="Settings.toggleACMEProviderFormFields()">
+                                <option value="digicert">DigiCert</option>
+                                <option value="letsencrypt">Let's Encrypt</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="grid-column: span 2">
+                            <label>ACME Directory URL</label>
+                            <input id="acme-provider-directory-url" placeholder="https://acme.example.com/directory">
+                            <small class="acme-provider-field acme-provider-letsencrypt" style="color:var(--text-muted); font-size:0.75rem; margin-top:4px; display:none">
+                                Use https://acme-staging-v02.api.letsencrypt.org/directory for testing
+                            </small>
+                        </div>
+                        <div class="form-group acme-provider-field acme-provider-digicert">
+                            <label>Key ID (KID)</label>
+                            <input id="acme-provider-kid" type="password" placeholder="Enter KID">
+                        </div>
+                        <div class="form-group acme-provider-field acme-provider-digicert">
+                            <label>HMAC Key</label>
+                            <input id="acme-provider-hmac-key" type="password" placeholder="Enter HMAC key">
+                        </div>
+                        <div class="form-group acme-provider-field acme-provider-letsencrypt" style="display:none">
+                            <label>Account Email</label>
+                            <input id="acme-provider-account-email" placeholder="admin@yourdomain.com">
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="Settings.saveACMEProvider()">
+                            <i class="fas fa-save"></i> Save Provider
+                        </button>
+                        <button class="btn btn-outline btn-sm" onclick="Settings.hideACMEProviderForm()">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>`;
@@ -299,8 +327,25 @@ const Settings = {
                             </select>
                         </div>
                         <div class="form-group">
-                            <label>Portal Group Tag</label>
-                            <input id="cert-portal-tag" value="Default Portal Certificate Group">
+                            <label>ACME Provider</label>
+                            <select id="cert-acme-provider">
+                                <option value="">— Select provider —</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                Portal Group Tag
+                                <button type="button" class="btn btn-outline btn-sm" style="margin-left:6px; padding:2px 8px; font-size:0.7rem" onclick="Settings.refreshPortalGroupTags()" title="Re-discover from ISE">
+                                    <i class="fas fa-sync-alt"></i>
+                                </button>
+                            </label>
+                            <select id="cert-portal-tag" style="display:none">
+                                <option value="Default Portal Certificate Group">Default Portal Certificate Group</option>
+                            </select>
+                            <input id="cert-portal-tag-input" value="Default Portal Certificate Group" placeholder="Default Portal Certificate Group">
+                            <small style="color:var(--text-muted); font-size:0.75rem; margin-top:4px; display:block">
+                                Click the refresh button to auto-discover tags from ISE.
+                            </small>
                         </div>
                         <div class="form-group">
                             <label>Renewal Threshold (days)</label>
@@ -314,7 +359,7 @@ const Settings = {
                             </select>
                         </div>
                         <div class="form-group" style="grid-column: span 2">
-                            <label>Assign to ISE Nodes</label>
+                            <label>Target ISE Nodes (push certificate to)</label>
                             <div id="cert-node-checkboxes" style="display:flex; flex-wrap:wrap; gap:0.75rem; padding:0.5rem 0">
                                 <span style="color:var(--text-muted); font-size:0.875rem">Loading nodes...</span>
                             </div>
@@ -520,10 +565,12 @@ const Settings = {
 
     // ── DNS field toggling ──
 
-    toggleACMEFields() {
-        const provider = document.getElementById('acme_provider')?.value;
-        document.querySelectorAll('.acme-field').forEach(el => el.style.display = 'none');
-        document.querySelectorAll(`.acme-${provider}`).forEach(el => el.style.display = 'flex');
+    toggleACMEProviderFormFields() {
+        const providerType = document.getElementById('acme-provider-type')?.value;
+        document.querySelectorAll('.acme-provider-field').forEach(el => el.style.display = 'none');
+        document.querySelectorAll(`.acme-provider-${providerType}`).forEach(el => el.style.display = 'flex');
+        // <small> helper text is inline; force it to block when shown
+        document.querySelectorAll(`small.acme-provider-${providerType}`).forEach(el => el.style.display = 'block');
     },
 
     toggleDNSFields() {
@@ -600,25 +647,140 @@ const Settings = {
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
     },
 
-    async saveACME() {
-        try {
-            const provider = document.getElementById('acme_provider').value;
-            const data = { acme_provider: provider };
+    // ── ACME Providers ──
 
-            if (provider === 'digicert') {
-                data.acme_directory_url = document.getElementById('acme_directory_url').value;
-                data.acme_kid = document.getElementById('acme_kid').value;
-                data.acme_hmac_key = document.getElementById('acme_hmac_key').value;
-                if (!data.acme_kid) delete data.acme_kid;
-                if (!data.acme_hmac_key) delete data.acme_hmac_key;
+    async loadACMEProviders() {
+        const container = document.getElementById('acme-providers-table');
+        try {
+            const providers = await api.getACMEProviders();
+            this._acmeProviders = providers;
+            if (!container) return;
+            if (!providers.length) {
+                container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No ACME providers configured yet. Click "Add Provider" to create one.</p>';
+                return;
+            }
+            container.innerHTML = `
+                <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>Name</th><th>Type</th><th>Directory URL</th>
+                        <th>Account Email</th><th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                        ${providers.map(p => `<tr>
+                            <td><strong>${this._escape(p.name)}</strong></td>
+                            <td><span class="badge ${p.provider_type === 'letsencrypt' ? 'info' : 'neutral'}">${p.provider_type}</span></td>
+                            <td style="font-size:0.8rem; word-break:break-all">${this._escape(p.directory_url)}</td>
+                            <td style="font-size:0.8rem">${this._escape(p.account_email || '—')}</td>
+                            <td>
+                                <button class="btn btn-outline btn-sm" onclick="Settings.editACMEProvider(${p.id})">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                                <button class="btn btn-danger btn-sm" onclick="Settings.deleteACMEProvider(${p.id})">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+                </div>`;
+        } catch (err) {
+            if (container) container.innerHTML = `<p style="color:var(--danger); font-size:0.875rem">Failed to load: ${err.message}</p>`;
+        }
+    },
+
+    _escape(s) {
+        if (s === null || s === undefined) return '';
+        return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    },
+
+    showACMEProviderForm() {
+        this.showSection('acme');
+        const panel = document.getElementById('acme-provider-form-panel');
+        const title = document.getElementById('acme-provider-form-title');
+        if (!panel) return;
+        document.getElementById('acme-provider-form-id').value = '';
+        document.getElementById('acme-provider-name').value = '';
+        document.getElementById('acme-provider-type').value = 'digicert';
+        document.getElementById('acme-provider-directory-url').value = 'https://acme.digicert.com/v2/acme/directory/';
+        document.getElementById('acme-provider-kid').value = '';
+        document.getElementById('acme-provider-hmac-key').value = '';
+        document.getElementById('acme-provider-account-email').value = '';
+        if (title) title.textContent = 'Add ACME Provider';
+        this.toggleACMEProviderFormFields();
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    editACMEProvider(id) {
+        const provider = this._acmeProviders.find(p => p.id === id);
+        if (!provider) return;
+        this.showSection('acme');
+        const panel = document.getElementById('acme-provider-form-panel');
+        const title = document.getElementById('acme-provider-form-title');
+        if (!panel) return;
+        document.getElementById('acme-provider-form-id').value = provider.id;
+        document.getElementById('acme-provider-name').value = provider.name;
+        document.getElementById('acme-provider-type').value = provider.provider_type;
+        document.getElementById('acme-provider-directory-url').value = provider.directory_url;
+        document.getElementById('acme-provider-kid').value = '';
+        document.getElementById('acme-provider-hmac-key').value = '';
+        document.getElementById('acme-provider-account-email').value = provider.account_email || '';
+        if (title) title.textContent = `Edit ACME Provider — ${provider.name}`;
+        this.toggleACMEProviderFormFields();
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    hideACMEProviderForm() {
+        const panel = document.getElementById('acme-provider-form-panel');
+        if (panel) panel.style.display = 'none';
+    },
+
+    async saveACMEProvider() {
+        try {
+            const id = document.getElementById('acme-provider-form-id').value;
+            const providerType = document.getElementById('acme-provider-type').value;
+
+            const data = {
+                name: document.getElementById('acme-provider-name').value.trim(),
+                provider_type: providerType,
+                directory_url: document.getElementById('acme-provider-directory-url').value.trim(),
+            };
+            if (!data.name) { Toast.warning('Please enter a provider name'); return; }
+            if (!data.directory_url) { Toast.warning('Please enter the ACME directory URL'); return; }
+
+            if (providerType === 'digicert') {
+                const kid = document.getElementById('acme-provider-kid').value;
+                const hmac = document.getElementById('acme-provider-hmac-key').value;
+                if (kid) data.kid = kid;
+                if (hmac) data.hmac_key = hmac;
             } else {
-                data.acme_directory_url = document.getElementById('acme_directory_url_le').value;
-                data.acme_account_email = document.getElementById('acme_account_email').value;
+                data.account_email = document.getElementById('acme-provider-account-email').value.trim() || null;
             }
 
-            await api.updateACME(data);
-            Toast.success('ACME settings saved');
-        } catch (err) { Toast.error('Failed to save: ' + err.message); }
+            if (id) {
+                await api.updateACMEProvider(parseInt(id), data);
+                Toast.success('ACME provider updated');
+            } else {
+                await api.createACMEProvider(data);
+                Toast.success('ACME provider added');
+            }
+
+            this.hideACMEProviderForm();
+            this.loadACMEProviders();
+        } catch (err) { Toast.error('Failed to save provider: ' + err.message); }
+    },
+
+    async deleteACMEProvider(id) {
+        const provider = this._acmeProviders.find(p => p.id === id);
+        if (!provider) return;
+        if (!confirm(`Delete ACME provider "${provider.name}"? This cannot be undone.`)) return;
+        try {
+            await api.deleteACMEProvider(id);
+            Toast.success(`Provider "${provider.name}" deleted`);
+            this.loadACMEProviders();
+        } catch (err) { Toast.error('Failed to delete: ' + err.message); }
     },
 
     async saveDNS() {
@@ -823,6 +985,7 @@ const Settings = {
         container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">Fetching...</p>';
         try {
             const certs = await api.getCertificates();
+            this._iseCertsCache = certs;
             if (!certs.length) {
                 container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No certificates found on ISE.</p>';
                 return;
@@ -835,17 +998,17 @@ const Settings = {
                         <th>Expiry</th><th>Used By</th><th>Action</th>
                     </tr></thead>
                     <tbody>
-                        ${certs.map(cert => {
+                        ${certs.map((cert, idx) => {
                             const cn = this._extractCN(cert.subject);
                             const expiry = cert.expiration_date ? cert.expiration_date.split('T')[0] : '—';
                             return `<tr>
-                                <td>${cert.friendly_name}</td>
-                                <td><code style="font-size:0.8rem">${cn}</code></td>
-                                <td style="font-size:0.8rem; color:var(--text-muted)">${cert.issuer || '—'}</td>
-                                <td style="font-size:0.8rem">${expiry}</td>
-                                <td style="font-size:0.8rem">${cert.used_by || '—'}</td>
+                                <td>${this._escape(cert.friendly_name)}</td>
+                                <td><code style="font-size:0.8rem">${this._escape(cn)}</code></td>
+                                <td style="font-size:0.8rem; color:var(--text-muted)">${this._escape(cert.issuer || '—')}</td>
+                                <td style="font-size:0.8rem">${this._escape(expiry)}</td>
+                                <td style="font-size:0.8rem">${this._escape(cert.used_by || '—')}</td>
                                 <td>
-                                    <button class="btn btn-outline btn-sm" onclick="Settings.showCertForm('${cn.replace(/'/g, "\\'")}')">
+                                    <button class="btn btn-outline btn-sm" onclick="Settings.showCertFormFromISE(${idx})">
                                         <i class="fas fa-plus"></i> Add to Auto-Renew
                                     </button>
                                 </td>
@@ -857,6 +1020,27 @@ const Settings = {
         } catch (err) {
             container.innerHTML = `<p style="color:var(--danger); font-size:0.875rem">Failed to load: ${err.message}</p>`;
         }
+    },
+
+    showCertFormFromISE(idx) {
+        const cert = this._iseCertsCache[idx];
+        if (!cert) return;
+        const prefill = {
+            common_name: this._extractCN(cert.subject),
+            san_names: cert.san_names || [],
+            key_type: this._normalizeKeyType(cert.key_type),
+            portal_group_tag: cert.portal_group_tag || 'Default Portal Certificate Group',
+            node_ids: cert.node_id ? [cert.node_id] : [],
+        };
+        this.showCertForm(prefill);
+    },
+
+    _normalizeKeyType(keyType) {
+        if (!keyType) return 'RSA_2048';
+        const supported = ['RSA_2048', 'RSA_4096', 'ECDSA_256'];
+        const upper = String(keyType).toUpperCase().replace(/[^A-Z0-9]/g, '_');
+        const match = supported.find(k => upper.includes(k.replace('_', '')) || upper === k);
+        return match || 'RSA_2048';
     },
 
     async loadManagedCerts() {
@@ -873,15 +1057,17 @@ const Settings = {
                 <table>
                     <thead><tr>
                         <th>Common Name</th><th>Key Type</th><th>Mode</th>
-                        <th>Threshold</th><th>Assigned Nodes</th><th>Enabled</th><th>Actions</th>
+                        <th>Provider</th><th>Target Nodes</th><th>Threshold</th>
+                        <th>Enabled</th><th>Actions</th>
                     </tr></thead>
                     <tbody>
                         ${certs.map(cert => `<tr>
-                            <td><strong>${cert.common_name}</strong></td>
-                            <td><span class="badge info">${cert.key_type}</span></td>
-                            <td><span class="badge neutral">${cert.certificate_mode}</span></td>
+                            <td><strong>${this._escape(cert.common_name)}</strong></td>
+                            <td><span class="badge info">${this._escape(cert.key_type)}</span></td>
+                            <td><span class="badge neutral">${this._escape(cert.certificate_mode)}</span></td>
+                            <td style="font-size:0.8rem">${cert.acme_provider_name ? this._escape(cert.acme_provider_name) : '<span style="color:var(--text-muted)">— not set —</span>'}</td>
+                            <td style="font-size:0.8rem">${cert.nodes.map(n => this._escape(n.name)).join(', ') || '—'}</td>
                             <td>${cert.renewal_threshold_days}d</td>
-                            <td style="font-size:0.8rem">${cert.nodes.map(n => n.name).join(', ') || '—'}</td>
                             <td>${cert.enabled ? '<span class="badge success">Yes</span>' : '<span class="badge neutral">No</span>'}</td>
                             <td>
                                 <button class="btn btn-outline btn-sm" onclick="Settings.editManagedCert(${cert.id})">
@@ -900,7 +1086,13 @@ const Settings = {
         }
     },
 
-    async showCertForm(prefillCN = '') {
+    async showCertForm(prefill = {}) {
+        // Backwards compatibility: string = common_name
+        if (typeof prefill === 'string') {
+            prefill = { common_name: prefill };
+        }
+        prefill = prefill || {};
+
         // Ensure we're on the certificates panel
         this.showSection('certificates');
 
@@ -910,19 +1102,22 @@ const Settings = {
 
         // Reset form
         document.getElementById('cert-form-id').value = '';
-        document.getElementById('cert-cn').value = prefillCN;
-        document.getElementById('cert-san').value = '';
-        document.getElementById('cert-key-type').value = 'RSA_2048';
-        document.getElementById('cert-mode').value = 'shared';
-        document.getElementById('cert-portal-tag').value = 'Default Portal Certificate Group';
-        document.getElementById('cert-threshold').value = '30';
+        document.getElementById('cert-cn').value = prefill.common_name || '';
+        document.getElementById('cert-san').value = (prefill.san_names || []).join(',');
+        document.getElementById('cert-key-type').value = prefill.key_type || 'RSA_2048';
+        document.getElementById('cert-mode').value = prefill.certificate_mode || 'shared';
+        document.getElementById('cert-threshold').value = prefill.renewal_threshold_days || '30';
         document.getElementById('cert-enabled').value = 'true';
         if (title) title.textContent = 'Add Certificate';
 
         panel.style.display = 'block';
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-        await this._loadNodeCheckboxes([]);
+        await Promise.all([
+            this._loadNodeCheckboxes(prefill.node_ids || []),
+            this._loadACMEProvidersDropdown(prefill.acme_provider_id || null),
+            this._loadPortalGroupTagsDropdown(prefill.portal_group_tag || 'Default Portal Certificate Group'),
+        ]);
     },
 
     async editManagedCert(id) {
@@ -941,7 +1136,6 @@ const Settings = {
             document.getElementById('cert-san').value = (cert.san_names || []).join(',');
             document.getElementById('cert-key-type').value = cert.key_type;
             document.getElementById('cert-mode').value = cert.certificate_mode;
-            document.getElementById('cert-portal-tag').value = cert.portal_group_tag;
             document.getElementById('cert-threshold').value = cert.renewal_threshold_days;
             document.getElementById('cert-enabled').value = cert.enabled ? 'true' : 'false';
             if (title) title.textContent = 'Edit Certificate';
@@ -950,8 +1144,91 @@ const Settings = {
             panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
             const assignedIds = cert.nodes.map(n => n.id);
-            await this._loadNodeCheckboxes(assignedIds);
+            await Promise.all([
+                this._loadNodeCheckboxes(assignedIds),
+                this._loadACMEProvidersDropdown(cert.acme_provider_id || null),
+                this._loadPortalGroupTagsDropdown(cert.portal_group_tag || 'Default Portal Certificate Group'),
+            ]);
         } catch (err) { Toast.error('Failed to load certificate: ' + err.message); }
+    },
+
+    async _loadACMEProvidersDropdown(selectedId) {
+        const select = document.getElementById('cert-acme-provider');
+        if (!select) return;
+        try {
+            const providers = this._acmeProviders && this._acmeProviders.length
+                ? this._acmeProviders
+                : await api.getACMEProviders();
+            this._acmeProviders = providers;
+
+            const options = ['<option value="">— Select provider —</option>']
+                .concat(providers.map(p =>
+                    `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${this._escape(p.name)} (${p.provider_type})</option>`
+                ));
+            select.innerHTML = options.join('');
+
+            if (!providers.length) {
+                select.innerHTML = '<option value="">— No providers configured —</option>';
+            }
+        } catch (err) {
+            select.innerHTML = '<option value="">— Failed to load —</option>';
+        }
+    },
+
+    async _loadPortalGroupTagsDropdown(selectedTag) {
+        const select = document.getElementById('cert-portal-tag');
+        const input = document.getElementById('cert-portal-tag-input');
+        if (!select || !input) return;
+
+        // If we have cached tags, use them; otherwise keep the free-text input.
+        if (this._portalGroupTags && this._portalGroupTags.length) {
+            this._populatePortalGroupSelect(selectedTag);
+            return;
+        }
+
+        // Start with the free-text input visible, prefill with selectedTag
+        input.value = selectedTag || 'Default Portal Certificate Group';
+        input.style.display = '';
+        select.style.display = 'none';
+    },
+
+    _populatePortalGroupSelect(selectedTag) {
+        const select = document.getElementById('cert-portal-tag');
+        const input = document.getElementById('cert-portal-tag-input');
+        if (!select || !input) return;
+
+        const tags = this._portalGroupTags || [];
+        const current = selectedTag || input.value || 'Default Portal Certificate Group';
+
+        // Ensure the currently-selected tag is present in the dropdown list.
+        const allTags = Array.from(new Set([current, ...tags])).filter(Boolean);
+
+        select.innerHTML = allTags.map(t =>
+            `<option value="${this._escape(t)}" ${t === current ? 'selected' : ''}>${this._escape(t)}</option>`
+        ).join('');
+
+        select.style.display = '';
+        input.style.display = 'none';
+    },
+
+    async refreshPortalGroupTags() {
+        try {
+            Toast.info('Fetching portal group tags from ISE...');
+            const tags = await api.getPortalGroupTags();
+            this._portalGroupTags = tags;
+
+            // Preserve whatever was previously entered/selected
+            const input = document.getElementById('cert-portal-tag-input');
+            const select = document.getElementById('cert-portal-tag');
+            const currentValue = (select && select.style.display !== 'none')
+                ? select.value
+                : (input ? input.value : 'Default Portal Certificate Group');
+
+            this._populatePortalGroupSelect(currentValue);
+            Toast.success(`Discovered ${tags.length} portal group tag(s)`);
+        } catch (err) {
+            Toast.error('Failed to fetch portal group tags: ' + err.message);
+        }
     },
 
     async _loadNodeCheckboxes(selectedIds) {
@@ -978,24 +1255,36 @@ const Settings = {
         if (panel) panel.style.display = 'none';
     },
 
+    _getPortalGroupTagValue() {
+        const select = document.getElementById('cert-portal-tag');
+        const input = document.getElementById('cert-portal-tag-input');
+        if (select && select.style.display !== 'none') return select.value;
+        if (input) return input.value;
+        return 'Default Portal Certificate Group';
+    },
+
     async saveManagedCert() {
         try {
             const id = document.getElementById('cert-form-id').value;
             const sanInput = document.getElementById('cert-san').value;
             const nodeIds = Array.from(document.querySelectorAll('.cert-node-cb:checked')).map(cb => parseInt(cb.value));
+            const providerId = document.getElementById('cert-acme-provider').value;
 
             const data = {
                 common_name: document.getElementById('cert-cn').value,
                 san_names: sanInput ? sanInput.split(',').map(s => s.trim()).filter(Boolean) : [],
                 key_type: document.getElementById('cert-key-type').value,
                 certificate_mode: document.getElementById('cert-mode').value,
-                portal_group_tag: document.getElementById('cert-portal-tag').value,
+                portal_group_tag: this._getPortalGroupTagValue(),
                 renewal_threshold_days: parseInt(document.getElementById('cert-threshold').value),
                 enabled: document.getElementById('cert-enabled').value === 'true',
+                acme_provider_id: providerId ? parseInt(providerId) : null,
                 node_ids: nodeIds,
             };
 
             if (!data.common_name) { Toast.warning('Please enter a Common Name'); return; }
+            if (!nodeIds.length) { Toast.warning('Please select at least one target ISE node'); return; }
+            if (!data.acme_provider_id) { Toast.warning('Please select an ACME provider'); return; }
 
             if (id) {
                 await api.updateManagedCertificate(parseInt(id), data);

@@ -17,7 +17,7 @@ class CertificateMode(str, Enum):
     PER_NODE = "per-node"
 
 
-class ACMEProvider(str, Enum):
+class ACMEProviderType(str, Enum):
     DIGICERT = "digicert"
     LETSENCRYPT = "letsencrypt"
 
@@ -56,8 +56,9 @@ class ISETestSettings(BaseModel):
 
 
 class ACMESettings(BaseModel):
-    acme_provider: ACMEProvider = Field(
-        ACMEProvider.DIGICERT,
+    """Legacy single-provider settings — kept for backwards compatibility."""
+    acme_provider: ACMEProviderType = Field(
+        ACMEProviderType.DIGICERT,
         description="ACME provider (digicert or letsencrypt)"
     )
     acme_directory_url: str = Field(
@@ -67,6 +68,42 @@ class ACMESettings(BaseModel):
     acme_kid: Optional[str] = Field(None, description="ACME Key ID (DigiCert)")
     acme_hmac_key: Optional[str] = Field(None, description="ACME HMAC Key (DigiCert)")
     acme_account_email: Optional[str] = Field(None, description="Account email (LetsEncrypt)")
+
+
+class ACMEProviderCreate(BaseModel):
+    name: str = Field(..., description="User-friendly label (unique)")
+    provider_type: ACMEProviderType = Field(..., description="Provider type")
+    directory_url: str = Field(..., description="ACME directory URL")
+    kid: Optional[str] = Field(None, description="Key ID (DigiCert)")
+    hmac_key: Optional[str] = Field(None, description="HMAC key (DigiCert)")
+    account_email: Optional[str] = Field(None, description="Account email (LetsEncrypt)")
+    account_key: Optional[str] = Field(None, description="Account private key PEM (LetsEncrypt)")
+
+
+class ACMEProviderUpdate(BaseModel):
+    name: Optional[str] = None
+    provider_type: Optional[ACMEProviderType] = None
+    directory_url: Optional[str] = None
+    kid: Optional[str] = None
+    hmac_key: Optional[str] = None
+    account_email: Optional[str] = None
+    account_key: Optional[str] = None
+
+
+class ACMEProviderResponse(BaseModel):
+    id: int
+    name: str
+    provider_type: str
+    directory_url: str
+    kid: Optional[str] = None
+    hmac_key: Optional[str] = None
+    account_email: Optional[str] = None
+    has_account_key: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class CertificateSettings(BaseModel):
@@ -177,6 +214,9 @@ class SystemCertificateInfo(BaseModel):
     used_by: Optional[str] = None
     key_type: Optional[str] = None
     node_name: Optional[str] = None
+    node_id: Optional[int] = None
+    san_names: List[str] = Field(default_factory=list)
+    portal_group_tag: Optional[str] = None
 
 
 # ──────────────────────────────────────
@@ -277,6 +317,7 @@ class ManagedCertificateCreate(BaseModel):
     certificate_mode: CertificateMode = Field(CertificateMode.SHARED)
     renewal_threshold_days: int = Field(30)
     enabled: bool = Field(True)
+    acme_provider_id: Optional[int] = Field(None, description="ACME provider to use for renewal")
     node_ids: List[int] = Field(default_factory=list, description="ISE node IDs to assign")
 
 
@@ -288,6 +329,7 @@ class ManagedCertificateUpdate(BaseModel):
     certificate_mode: Optional[CertificateMode] = None
     renewal_threshold_days: Optional[int] = None
     enabled: Optional[bool] = None
+    acme_provider_id: Optional[int] = None
     node_ids: Optional[List[int]] = None
 
 
@@ -300,6 +342,8 @@ class ManagedCertificateResponse(BaseModel):
     certificate_mode: str
     renewal_threshold_days: int
     enabled: bool
+    acme_provider_id: Optional[int] = None
+    acme_provider_name: Optional[str] = None
     last_renewal_at: Optional[datetime] = None
     last_renewal_status: Optional[str] = None
     created_at: datetime

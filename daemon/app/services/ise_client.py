@@ -168,6 +168,62 @@ class ISEClient:
         response.raise_for_status()
         return response.json()
 
+    def get_portal_group_tags(self, node_name: str = None) -> list:
+        """
+        Auto-discover portal group tags available in the ISE deployment.
+
+        Strategy:
+          1. Try the ERS portal endpoint (enumerates all portals and their
+             certificateGroupTag).
+          2. Fallback: scan system certificates on the given node and collect
+             any ``portalGroupTag`` values present.
+        Results always include the built-in default group tag.
+        """
+        tags = set()
+
+        # Primary source: ERS portal API
+        try:
+            url = f"{self.ers_base_url}/portal"
+            response = self.ers_session.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            resources = data.get("SearchResult", {}).get("resources", [])
+            for resource in resources:
+                portal_id = resource.get("id", "")
+                if not portal_id:
+                    continue
+                try:
+                    detail_url = f"{self.ers_base_url}/portal/{portal_id}"
+                    detail_resp = self.ers_session.get(detail_url, timeout=30)
+                    detail_resp.raise_for_status()
+                    portal = detail_resp.json().get("Portal", {})
+                    settings = portal.get("settings", {}) or {}
+                    portal_settings = settings.get("portalSettings", {}) or {}
+                    tag = (
+                        portal_settings.get("certificateGroupTag")
+                        or portal.get("certificateGroupTag")
+                    )
+                    if tag:
+                        tags.add(tag)
+                except Exception as e:
+                    logger.debug(f"Failed to fetch portal {portal_id}: {e}")
+        except Exception as e:
+            logger.debug(f"ERS portal discovery failed, will fall back to system certs: {e}")
+
+        # Secondary source: scan system certs for portalGroupTag values
+        if node_name:
+            try:
+                certs = self.get_system_certificates(node_name)
+                for cert in certs:
+                    tag = cert.get("portalGroupTag") or cert.get("portalTagTransferForSameSubject")
+                    if tag:
+                        tags.add(tag)
+            except Exception as e:
+                logger.debug(f"Fallback portal tag discovery from certs failed: {e}")
+
+        tags.add("Default Portal Certificate Group")
+        return sorted(tags)
+
     # ──────────────────────────────
     # ERS API — Node Discovery
     # ──────────────────────────────

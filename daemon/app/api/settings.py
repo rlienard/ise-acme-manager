@@ -206,6 +206,17 @@ def get_system_certificates(db: Session = Depends(get_db)):
         certs = client.get_system_certificates(node.name)
         result = []
         for cert in certs:
+            # Parse SAN names — ISE returns them as a comma-separated string
+            san_raw = (
+                cert.get("subjectAlternativeNames")
+                or cert.get("subjectAlternativeName")
+                or ""
+            )
+            if isinstance(san_raw, list):
+                san_list = [s.strip() for s in san_raw if s]
+            else:
+                san_list = [s.strip() for s in str(san_raw).split(",") if s.strip()]
+
             result.append(SystemCertificateInfo(
                 id=str(cert.get("id", "")),
                 friendly_name=cert.get("friendlyName", ""),
@@ -215,10 +226,29 @@ def get_system_certificates(db: Session = Depends(get_db)):
                 used_by=cert.get("usedBy", ""),
                 key_type=cert.get("keyType", ""),
                 node_name=node.name,
+                node_id=node.id,
+                san_names=san_list,
+                portal_group_tag=cert.get("portalGroupTag") or None,
             ))
         return result
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch certificates: {e}")
+
+
+@router.get("/portal-group-tags", response_model=list[str])
+def get_portal_group_tags(db: Session = Depends(get_db)):
+    """Auto-discover ISE Portal Group Tags from portals and system certificates."""
+    config = ConfigManager.get_flat(db)
+    client = ISEClient(config)
+
+    node = db.query(ISENode).filter(ISENode.is_primary == True).first()
+    if not node:
+        node = db.query(ISENode).filter(ISENode.enabled == True).first()
+
+    try:
+        return client.get_portal_group_tags(node.name if node else None)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch portal group tags: {e}")
 
 
 # ──────────────────────────────

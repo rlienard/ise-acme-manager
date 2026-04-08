@@ -47,8 +47,9 @@ const api = {
     discoverNodes() { return this.request('POST', '/api/v1/settings/nodes/discover'); },
     syncNodes(nodes) { return this.request('POST', '/api/v1/settings/nodes/sync', nodes); },
 
-    // Certificates
+    // Certificates (fetched from ISE)
     getCertificates() { return this.request('GET', '/api/v1/settings/certificates'); },
+    getPortalGroupTags() { return this.request('GET', '/api/v1/settings/portal-group-tags'); },
 
     // Tests
     testISE(data) { return this.request('POST', '/api/v1/settings/test/ise', data || null); },
@@ -79,4 +80,11 @@ const api = {
     createManagedCertificate(data) { return this.request('POST', '/api/v1/certificates', data); },
     updateManagedCertificate(id, data) { return this.request('PUT', `/api/v1/certificates/${id}`, data); },
     deleteManagedCertificate(id) { return this.request('DELETE', `/api/v1/certificates/${id}`); },
+
+    // ACME Providers
+    getACMEProviders() { return this.request('GET', '/api/v1/acme-providers'); },
+    getACMEProvider(id) { return this.request('GET', `/api/v1/acme-providers/${id}`); },
+    createACMEProvider(data) { return this.request('POST', '/api/v1/acme-providers', data); },
+    updateACMEProvider(id, data) { return this.request('PUT', `/api/v1/acme-providers/${id}`, data); },
+    deleteACMEProvider(id) { return this.request('DELETE', `/api/v1/acme-providers/${id}`); },
 };

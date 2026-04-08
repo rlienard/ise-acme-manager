@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from ..database import (
     SessionLocal, RenewalHistory, DaemonStatus, ISENode,
-    ManagedCertificate, RenewalStatus, DaemonState
+    ManagedCertificate, ACMEProvider, RenewalStatus, DaemonState
 )
 from ..config import ConfigManager
 from .ise_client import ISEClient
@@ -49,7 +49,7 @@ class ACMERenewalEngine:
             ise = ISEClient(config)
             dns = get_dns_provider(config)
             notifier = EmailNotifier(config)
-            acme_provider = config.get("acme_provider", "digicert")
+            legacy_acme_provider = config.get("acme_provider", "digicert")
 
             # Fetch enabled managed certificates
             managed_certs = (
@@ -70,8 +70,28 @@ class ACMERenewalEngine:
                     logger.warning(f"Cert '{managed_cert.common_name}' has no enabled nodes — skipping")
                     continue
 
+                # Resolve the ACME provider to use for this cert. Prefer the
+                # per-cert provider; fall back to legacy global settings when
+                # no provider has been assigned.
+                provider_row = managed_cert.acme_provider
+                if provider_row is not None:
+                    acme_provider = provider_row.provider_type
+                    provider_overlay = {
+                        "acme_provider": provider_row.provider_type,
+                        "acme_directory_url": provider_row.directory_url,
+                        "acme_kid": provider_row.kid,
+                        "acme_hmac_key": provider_row.hmac_key,
+                        "acme_account_email": provider_row.account_email,
+                        "acme_account_key": provider_row.account_key,
+                        "_acme_provider_id": provider_row.id,
+                    }
+                else:
+                    acme_provider = legacy_acme_provider
+                    provider_overlay = {}
+
                 # Build per-cert config overlay
                 cert_config = dict(config)
+                cert_config.update(provider_overlay)
                 cert_config["common_name"] = managed_cert.common_name
                 cert_config["san_names"] = managed_cert.san_names or []
                 cert_config["key_type"] = managed_cert.key_type
@@ -338,11 +358,24 @@ class ACMERenewalEngine:
         )
         client.register_account()
 
-        # Persist the account key if it was freshly generated
+        # Persist the account key if it was freshly generated. Prefer the
+        # per-cert provider row if one is in the config overlay.
         if not account_key_pem:
             new_pem = client.get_account_key_pem()
+            provider_id = config.get("_acme_provider_id")
+            if provider_id:
+                provider_row = (
+                    db.query(ACMEProvider)
+                    .filter(ACMEProvider.id == provider_id)
+                    .first()
+                )
+                if provider_row:
+                    provider_row.account_key = new_pem
+                    db.commit()
+                    logger.info(f"Persisted new ACME account key for provider '{provider_row.name}'")
+                    return client
             ConfigManager.set(db, "acme_account_key", new_pem, "acme")
-            logger.info("Persisted new ACME account key")
+            logger.info("Persisted new ACME account key (legacy global setting)")
 
         return client
 
