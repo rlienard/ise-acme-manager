@@ -85,6 +85,18 @@ certificate_node_assignments = Table(
 )
 
 
+class DNSProvider(Base):
+    """DNS provider configuration — multiple providers supported, linked from ACME providers for DNS-01 challenge automation."""
+    __tablename__ = "dns_providers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)  # user-friendly label
+    provider_type = Column(String(50), nullable=False)  # 'cloudflare', 'aws_route53', 'azure_dns', 'ovhcloud'
+    config_json = Column(Text, nullable=True)  # JSON-encoded provider-specific configuration
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ACMEProvider(Base):
     """ACME provider configuration — multiple providers supported for per-cert selection."""
     __tablename__ = "acme_providers"
@@ -97,8 +109,10 @@ class ACMEProvider(Base):
     hmac_key = Column(Text, nullable=True)     # DigiCert HMAC key
     account_email = Column(String(255), nullable=True)  # LetsEncrypt
     account_key = Column(Text, nullable=True)  # LetsEncrypt account PEM
+    dns_provider_id = Column(Integer, ForeignKey("dns_providers.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    dns_provider = relationship("DNSProvider")
 
 
 class ManagedCertificate(Base):
@@ -198,6 +212,9 @@ def init_db():
         # Migrate legacy global ACME settings to an ACMEProvider row
         _migrate_legacy_acme_provider(db)
 
+        # Migrate legacy global DNS settings to a DNSProvider row
+        _migrate_legacy_dns_provider(db)
+
     finally:
         db.close()
 
@@ -211,6 +228,13 @@ def _migrate_add_columns():
             with engine.begin() as conn:
                 conn.execute(text(
                     "ALTER TABLE managed_certificates ADD COLUMN acme_provider_id INTEGER"
+                ))
+    if "acme_providers" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("acme_providers")}
+        if "dns_provider_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE acme_providers ADD COLUMN dns_provider_id INTEGER"
                 ))
 
 
@@ -253,6 +277,65 @@ def _migrate_legacy_acme_provider(db):
     )
     for cert in existing_certs:
         cert.acme_provider_id = provider.id
+
+    db.commit()
+
+
+def _migrate_legacy_dns_provider(db):
+    """Create a default DNSProvider row from legacy global DNS settings, link to existing ACME providers."""
+    import json
+    if db.query(DNSProvider).count() > 0:
+        return
+
+    def _get(key, default=None):
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row or row.value is None:
+            return default
+        return row.value
+
+    provider_type = (_get("dns_provider", "cloudflare") or "cloudflare").lower()
+
+    # Map provider type to the relevant config keys from legacy settings.
+    config_keys_by_type = {
+        "cloudflare": ["cloudflare_api_token", "cloudflare_zone_id"],
+        "aws_route53": ["aws_hosted_zone_id", "aws_region"],
+        "azure_dns": ["azure_subscription_id", "azure_resource_group", "azure_dns_zone_name"],
+        "ovhcloud": [
+            "ovh_endpoint", "ovh_application_key", "ovh_application_secret",
+            "ovh_consumer_key", "ovh_dns_zone",
+        ],
+    }
+    keys = config_keys_by_type.get(provider_type, [])
+    config = {k: _get(k, "") or "" for k in keys}
+
+    # If no legacy config was ever populated, skip the seed entirely.
+    if not any(config.values()):
+        return
+
+    name_by_type = {
+        "cloudflare": "Cloudflare (default)",
+        "aws_route53": "AWS Route53 (default)",
+        "azure_dns": "Azure DNS (default)",
+        "ovhcloud": "OVHcloud (default)",
+    }
+    name = name_by_type.get(provider_type, f"{provider_type} (default)")
+
+    provider = DNSProvider(
+        name=name,
+        provider_type=provider_type,
+        config_json=json.dumps(config),
+    )
+    db.add(provider)
+    db.flush()
+
+    # Link to any existing ACME providers that have no DNS provider assigned.
+    orphan_acme = (
+        db.query(ACMEProvider)
+        .filter(ACMEProvider.dns_provider_id.is_(None))
+        .all()
+    )
+    for ap in orphan_acme:
+        ap.dns_provider_id = provider.id
 
     db.commit()
 

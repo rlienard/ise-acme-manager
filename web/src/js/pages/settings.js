@@ -7,6 +7,7 @@ const Settings = {
     _activeSection: 'ise',
     _discoveredNodes: [],
     _acmeProviders: [],
+    _dnsProviders: [],
     _portalGroupTags: [],
     _iseCertsCache: [],
 
@@ -65,8 +66,9 @@ const Settings = {
     afterRender() {
         this.showSection(this._activeSection || 'ise');
         this.toggleACMEProviderFormFields();
-        this.toggleDNSFields();
+        this.toggleDNSProviderFormFields();
         this.loadNodes();
+        this.loadDNSProviders();
         this.loadACMEProviders();
         this.loadManagedCerts();
         this.loadSystemInfo();
@@ -240,6 +242,15 @@ const Settings = {
                                 Use https://acme-staging-v02.api.letsencrypt.org/directory for testing
                             </small>
                         </div>
+                        <div class="form-group" style="grid-column: span 2">
+                            <label>DNS Provider (for DNS-01 challenge)</label>
+                            <select id="acme-provider-dns">
+                                <option value="">— Select DNS provider —</option>
+                            </select>
+                            <small style="color:var(--text-muted); font-size:0.75rem; margin-top:4px; display:block">
+                                The DNS provider used to publish DNS-01 challenge records for certificates issued through this ACME provider.
+                            </small>
+                        </div>
                         <div class="form-group acme-provider-field acme-provider-digicert">
                             <label>Key ID (KID)</label>
                             <input id="acme-provider-kid" type="password" placeholder="Enter KID">
@@ -382,81 +393,113 @@ const Settings = {
         return `
         <div id="panel-dns" class="settings-panel">
             <div class="settings-section">
-                <h2><i class="fas fa-globe"></i> DNS Provider</h2>
-                <div class="form-grid">
-                    <div class="form-group">
-                        <label>Provider</label>
-                        <select id="dns_provider" onchange="Settings.toggleDNSFields()">
-                            <option value="cloudflare" ${s.dns?.dns_provider === 'cloudflare' ? 'selected' : ''}>Cloudflare</option>
-                            <option value="aws_route53" ${s.dns?.dns_provider === 'aws_route53' ? 'selected' : ''}>AWS Route53</option>
-                            <option value="azure_dns" ${s.dns?.dns_provider === 'azure_dns' ? 'selected' : ''}>Azure DNS</option>
-                            <option value="ovhcloud" ${s.dns?.dns_provider === 'ovhcloud' ? 'selected' : ''}>OVHcloud</option>
-                        </select>
-                    </div>
-                    <div class="form-group dns-field dns-cloudflare">
-                        <label>Cloudflare API Token</label>
-                        <input id="cloudflare_api_token" type="password" placeholder="Enter token">
-                    </div>
-                    <div class="form-group dns-field dns-cloudflare">
-                        <label>Cloudflare Zone ID</label>
-                        <input id="cloudflare_zone_id" value="${s.dns?.cloudflare_zone_id || ''}">
-                    </div>
-                    <div class="form-group dns-field dns-aws_route53" style="display:none">
-                        <label>Hosted Zone ID</label>
-                        <input id="aws_hosted_zone_id" value="${s.dns?.aws_hosted_zone_id || ''}">
-                    </div>
-                    <div class="form-group dns-field dns-aws_route53" style="display:none">
-                        <label>AWS Region</label>
-                        <input id="aws_region" value="${s.dns?.aws_region || 'us-east-1'}">
-                    </div>
-                    <div class="form-group dns-field dns-azure_dns" style="display:none">
-                        <label>Subscription ID</label>
-                        <input id="azure_subscription_id" value="${s.dns?.azure_subscription_id || ''}">
-                    </div>
-                    <div class="form-group dns-field dns-azure_dns" style="display:none">
-                        <label>Resource Group</label>
-                        <input id="azure_resource_group" value="${s.dns?.azure_resource_group || ''}">
-                    </div>
-                    <div class="form-group dns-field dns-azure_dns" style="display:none">
-                        <label>DNS Zone Name</label>
-                        <input id="azure_dns_zone_name" value="${s.dns?.azure_dns_zone_name || ''}">
-                    </div>
-                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
-                        <label>API Endpoint</label>
-                        <select id="ovh_endpoint">
-                            <option value="ovh-eu" ${s.dns?.ovh_endpoint === 'ovh-eu' ? 'selected' : ''}>OVH Europe (ovh-eu)</option>
-                            <option value="ovh-us" ${s.dns?.ovh_endpoint === 'ovh-us' ? 'selected' : ''}>OVH US (ovh-us)</option>
-                            <option value="ovh-ca" ${s.dns?.ovh_endpoint === 'ovh-ca' ? 'selected' : ''}>OVH Canada (ovh-ca)</option>
-                            <option value="kimsufi-eu" ${s.dns?.ovh_endpoint === 'kimsufi-eu' ? 'selected' : ''}>Kimsufi Europe (kimsufi-eu)</option>
-                            <option value="kimsufi-ca" ${s.dns?.ovh_endpoint === 'kimsufi-ca' ? 'selected' : ''}>Kimsufi Canada (kimsufi-ca)</option>
-                            <option value="soyoustart-eu" ${s.dns?.ovh_endpoint === 'soyoustart-eu' ? 'selected' : ''}>So You Start Europe (soyoustart-eu)</option>
-                            <option value="soyoustart-ca" ${s.dns?.ovh_endpoint === 'soyoustart-ca' ? 'selected' : ''}>So You Start Canada (soyoustart-ca)</option>
-                        </select>
-                    </div>
-                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
-                        <label>Application Key</label>
-                        <input id="ovh_application_key" type="password" placeholder="Enter application key">
-                    </div>
-                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
-                        <label>Application Secret</label>
-                        <input id="ovh_application_secret" type="password" placeholder="Enter application secret">
-                    </div>
-                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
-                        <label>Consumer Key</label>
-                        <input id="ovh_consumer_key" type="password" placeholder="Enter consumer key">
-                    </div>
-                    <div class="form-group dns-field dns-ovhcloud" style="display:none">
-                        <label>DNS Zone</label>
-                        <input id="ovh_dns_zone" value="${s.dns?.ovh_dns_zone || ''}" placeholder="example.com">
-                    </div>
+                <h2><i class="fas fa-globe"></i> DNS Providers</h2>
+                <p style="color:var(--text-muted); font-size:0.875rem; margin-top:-0.5rem">
+                    Configure one or more DNS providers. Each ACME provider can be linked to
+                    a specific DNS provider to drive its DNS-01 challenge automation.
+                </p>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem">
+                    <h3 style="font-size:0.95rem; color:var(--text-muted); margin:0">Configured Providers</h3>
+                    <button class="btn btn-primary btn-sm" onclick="Settings.showDNSProviderForm()">
+                        <i class="fas fa-plus"></i> Add Provider
+                    </button>
                 </div>
-                <div class="btn-group">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.saveDNS()">
-                        <i class="fas fa-save"></i> Save DNS Settings
-                    </button>
-                    <button class="btn btn-outline btn-sm" onclick="Settings.testDNS()">
-                        <i class="fas fa-plug"></i> Test Connection
-                    </button>
+                <div id="dns-providers-table">
+                    <p style="color:var(--text-muted); font-size:0.875rem">Loading...</p>
+                </div>
+
+                <!-- Add/Edit DNS Provider Form (hidden by default) -->
+                <div id="dns-provider-form-panel" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.25rem">
+                    <h3 style="font-size:0.95rem; margin-bottom:1rem" id="dns-provider-form-title">Add DNS Provider</h3>
+                    <input type="hidden" id="dns-provider-form-id">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Name (unique label)</label>
+                            <input id="dns-provider-name" placeholder="e.g. Cloudflare — corp zone">
+                        </div>
+                        <div class="form-group">
+                            <label>Provider Type</label>
+                            <select id="dns-provider-type" onchange="Settings.toggleDNSProviderFormFields()">
+                                <option value="cloudflare">Cloudflare</option>
+                                <option value="aws_route53">AWS Route53</option>
+                                <option value="azure_dns">Azure DNS</option>
+                                <option value="ovhcloud">OVHcloud</option>
+                            </select>
+                        </div>
+
+                        <!-- Cloudflare -->
+                        <div class="form-group dns-provider-field dns-provider-cloudflare">
+                            <label>Cloudflare API Token</label>
+                            <input id="dns-cf-api-token" type="password" placeholder="Enter token (leave blank to keep)">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-cloudflare">
+                            <label>Cloudflare Zone ID</label>
+                            <input id="dns-cf-zone-id" placeholder="Zone ID">
+                        </div>
+
+                        <!-- AWS Route53 -->
+                        <div class="form-group dns-provider-field dns-provider-aws_route53" style="display:none">
+                            <label>Hosted Zone ID</label>
+                            <input id="dns-aws-zone-id" placeholder="Z123ABC...">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-aws_route53" style="display:none">
+                            <label>AWS Region</label>
+                            <input id="dns-aws-region" value="us-east-1">
+                        </div>
+
+                        <!-- Azure DNS -->
+                        <div class="form-group dns-provider-field dns-provider-azure_dns" style="display:none">
+                            <label>Subscription ID</label>
+                            <input id="dns-az-subscription-id" placeholder="Subscription ID">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-azure_dns" style="display:none">
+                            <label>Resource Group</label>
+                            <input id="dns-az-resource-group" placeholder="Resource group">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-azure_dns" style="display:none">
+                            <label>DNS Zone Name</label>
+                            <input id="dns-az-zone-name" placeholder="example.com">
+                        </div>
+
+                        <!-- OVHcloud -->
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <label>API Endpoint</label>
+                            <select id="dns-ovh-endpoint">
+                                <option value="ovh-eu">OVH Europe (ovh-eu)</option>
+                                <option value="ovh-us">OVH US (ovh-us)</option>
+                                <option value="ovh-ca">OVH Canada (ovh-ca)</option>
+                                <option value="kimsufi-eu">Kimsufi Europe (kimsufi-eu)</option>
+                                <option value="kimsufi-ca">Kimsufi Canada (kimsufi-ca)</option>
+                                <option value="soyoustart-eu">So You Start Europe (soyoustart-eu)</option>
+                                <option value="soyoustart-ca">So You Start Canada (soyoustart-ca)</option>
+                            </select>
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <label>Application Key</label>
+                            <input id="dns-ovh-app-key" type="password" placeholder="Enter application key">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <label>Application Secret</label>
+                            <input id="dns-ovh-app-secret" type="password" placeholder="Enter application secret">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <label>Consumer Key</label>
+                            <input id="dns-ovh-consumer-key" type="password" placeholder="Enter consumer key">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <label>DNS Zone</label>
+                            <input id="dns-ovh-dns-zone" placeholder="example.com">
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="Settings.saveDNSProvider()">
+                            <i class="fas fa-save"></i> Save Provider
+                        </button>
+                        <button class="btn btn-outline btn-sm" onclick="Settings.hideDNSProviderForm()">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>`;
@@ -573,10 +616,11 @@ const Settings = {
         document.querySelectorAll(`small.acme-provider-${providerType}`).forEach(el => el.style.display = 'block');
     },
 
-    toggleDNSFields() {
-        const provider = document.getElementById('dns_provider')?.value;
-        document.querySelectorAll('.dns-field').forEach(el => el.style.display = 'none');
-        document.querySelectorAll(`.dns-${provider}`).forEach(el => el.style.display = 'flex');
+    toggleDNSProviderFormFields() {
+        const providerType = document.getElementById('dns-provider-type')?.value;
+        if (!providerType) return;
+        document.querySelectorAll('.dns-provider-field').forEach(el => el.style.display = 'none');
+        document.querySelectorAll(`.dns-provider-${providerType}`).forEach(el => el.style.display = 'flex');
     },
 
     // ── Node list ──
@@ -664,13 +708,14 @@ const Settings = {
                 <table>
                     <thead><tr>
                         <th>Name</th><th>Type</th><th>Directory URL</th>
-                        <th>Account Email</th><th>Actions</th>
+                        <th>DNS Provider</th><th>Account Email</th><th>Actions</th>
                     </tr></thead>
                     <tbody>
                         ${providers.map(p => `<tr>
                             <td><strong>${this._escape(p.name)}</strong></td>
                             <td><span class="badge ${p.provider_type === 'letsencrypt' ? 'info' : 'neutral'}">${p.provider_type}</span></td>
                             <td style="font-size:0.8rem; word-break:break-all">${this._escape(p.directory_url)}</td>
+                            <td style="font-size:0.8rem">${p.dns_provider_name ? this._escape(p.dns_provider_name) : '<span style="color:var(--text-muted)">— not set —</span>'}</td>
                             <td style="font-size:0.8rem">${this._escape(p.account_email || '—')}</td>
                             <td>
                                 <button class="btn btn-outline btn-sm" onclick="Settings.editACMEProvider(${p.id})">
@@ -694,7 +739,7 @@ const Settings = {
         return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     },
 
-    showACMEProviderForm() {
+    async showACMEProviderForm() {
         this.showSection('acme');
         const panel = document.getElementById('acme-provider-form-panel');
         const title = document.getElementById('acme-provider-form-title');
@@ -708,11 +753,12 @@ const Settings = {
         document.getElementById('acme-provider-account-email').value = '';
         if (title) title.textContent = 'Add ACME Provider';
         this.toggleACMEProviderFormFields();
+        await this._loadDNSProvidersDropdown(null);
         panel.style.display = 'block';
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
 
-    editACMEProvider(id) {
+    async editACMEProvider(id) {
         const provider = this._acmeProviders.find(p => p.id === id);
         if (!provider) return;
         this.showSection('acme');
@@ -728,6 +774,7 @@ const Settings = {
         document.getElementById('acme-provider-account-email').value = provider.account_email || '';
         if (title) title.textContent = `Edit ACME Provider — ${provider.name}`;
         this.toggleACMEProviderFormFields();
+        await this._loadDNSProvidersDropdown(provider.dns_provider_id || null);
         panel.style.display = 'block';
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
@@ -741,14 +788,20 @@ const Settings = {
         try {
             const id = document.getElementById('acme-provider-form-id').value;
             const providerType = document.getElementById('acme-provider-type').value;
+            const dnsProviderId = document.getElementById('acme-provider-dns').value;
 
             const data = {
                 name: document.getElementById('acme-provider-name').value.trim(),
                 provider_type: providerType,
                 directory_url: document.getElementById('acme-provider-directory-url').value.trim(),
+                dns_provider_id: dnsProviderId ? parseInt(dnsProviderId) : null,
             };
             if (!data.name) { Toast.warning('Please enter a provider name'); return; }
             if (!data.directory_url) { Toast.warning('Please enter the ACME directory URL'); return; }
+            if (!data.dns_provider_id) {
+                Toast.warning('Please select a DNS provider for the DNS-01 challenge');
+                return;
+            }
 
             if (providerType === 'digicert') {
                 const kid = document.getElementById('acme-provider-kid').value;
@@ -783,30 +836,223 @@ const Settings = {
         } catch (err) { Toast.error('Failed to delete: ' + err.message); }
     },
 
-    async saveDNS() {
+    // ── DNS Providers ──
+
+    async loadDNSProviders() {
+        const container = document.getElementById('dns-providers-table');
         try {
+            const providers = await api.getDNSProviders();
+            this._dnsProviders = providers;
+            if (!container) return;
+            if (!providers.length) {
+                container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No DNS providers configured yet. Click "Add Provider" to create one.</p>';
+                return;
+            }
+            container.innerHTML = `
+                <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>Name</th><th>Type</th><th>Zone / Target</th><th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                        ${providers.map(p => `<tr>
+                            <td><strong>${this._escape(p.name)}</strong></td>
+                            <td><span class="badge info">${this._escape(p.provider_type)}</span></td>
+                            <td style="font-size:0.8rem">${this._escape(this._dnsProviderZoneSummary(p))}</td>
+                            <td>
+                                <button class="btn btn-outline btn-sm" onclick="Settings.editDNSProvider(${p.id})">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                                <button class="btn btn-outline btn-sm" onclick="Settings.testDNSProvider(${p.id})">
+                                    <i class="fas fa-plug"></i>
+                                </button>
+                                <button class="btn btn-danger btn-sm" onclick="Settings.deleteDNSProvider(${p.id})">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+                </div>`;
+        } catch (err) {
+            if (container) container.innerHTML = `<p style="color:var(--danger); font-size:0.875rem">Failed to load: ${err.message}</p>`;
+        }
+    },
+
+    _dnsProviderZoneSummary(p) {
+        const cfg = p.config || {};
+        switch (p.provider_type) {
+            case 'cloudflare':  return cfg.cloudflare_zone_id || '—';
+            case 'aws_route53': return cfg.aws_hosted_zone_id || '—';
+            case 'azure_dns':   return cfg.azure_dns_zone_name || '—';
+            case 'ovhcloud':    return cfg.ovh_dns_zone || '—';
+            default:            return '—';
+        }
+    },
+
+    showDNSProviderForm() {
+        this.showSection('dns');
+        const panel = document.getElementById('dns-provider-form-panel');
+        const title = document.getElementById('dns-provider-form-title');
+        if (!panel) return;
+        document.getElementById('dns-provider-form-id').value = '';
+        document.getElementById('dns-provider-name').value = '';
+        document.getElementById('dns-provider-type').value = 'cloudflare';
+        // Clear all per-provider fields
+        ['dns-cf-api-token', 'dns-cf-zone-id',
+         'dns-aws-zone-id', 'dns-az-subscription-id', 'dns-az-resource-group', 'dns-az-zone-name',
+         'dns-ovh-app-key', 'dns-ovh-app-secret', 'dns-ovh-consumer-key', 'dns-ovh-dns-zone'
+        ].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+        const awsRegion = document.getElementById('dns-aws-region');
+        if (awsRegion) awsRegion.value = 'us-east-1';
+        const ovhEp = document.getElementById('dns-ovh-endpoint');
+        if (ovhEp) ovhEp.value = 'ovh-eu';
+        if (title) title.textContent = 'Add DNS Provider';
+        this.toggleDNSProviderFormFields();
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    editDNSProvider(id) {
+        const provider = this._dnsProviders.find(p => p.id === id);
+        if (!provider) return;
+        this.showSection('dns');
+        const panel = document.getElementById('dns-provider-form-panel');
+        const title = document.getElementById('dns-provider-form-title');
+        if (!panel) return;
+        const cfg = provider.config || {};
+        document.getElementById('dns-provider-form-id').value = provider.id;
+        document.getElementById('dns-provider-name').value = provider.name;
+        document.getElementById('dns-provider-type').value = provider.provider_type;
+        // Cloudflare
+        document.getElementById('dns-cf-api-token').value = '';
+        document.getElementById('dns-cf-api-token').placeholder = cfg.cloudflare_api_token ? 'Leave blank to keep existing token' : 'Enter token';
+        document.getElementById('dns-cf-zone-id').value = cfg.cloudflare_zone_id || '';
+        // AWS
+        document.getElementById('dns-aws-zone-id').value = cfg.aws_hosted_zone_id || '';
+        document.getElementById('dns-aws-region').value = cfg.aws_region || 'us-east-1';
+        // Azure
+        document.getElementById('dns-az-subscription-id').value = cfg.azure_subscription_id || '';
+        document.getElementById('dns-az-resource-group').value = cfg.azure_resource_group || '';
+        document.getElementById('dns-az-zone-name').value = cfg.azure_dns_zone_name || '';
+        // OVHcloud
+        document.getElementById('dns-ovh-endpoint').value = cfg.ovh_endpoint || 'ovh-eu';
+        document.getElementById('dns-ovh-app-key').value = '';
+        document.getElementById('dns-ovh-app-key').placeholder = cfg.ovh_application_key ? 'Leave blank to keep existing key' : 'Enter application key';
+        document.getElementById('dns-ovh-app-secret').value = '';
+        document.getElementById('dns-ovh-app-secret').placeholder = cfg.ovh_application_secret ? 'Leave blank to keep existing secret' : 'Enter application secret';
+        document.getElementById('dns-ovh-consumer-key').value = '';
+        document.getElementById('dns-ovh-consumer-key').placeholder = cfg.ovh_consumer_key ? 'Leave blank to keep existing key' : 'Enter consumer key';
+        document.getElementById('dns-ovh-dns-zone').value = cfg.ovh_dns_zone || '';
+
+        if (title) title.textContent = `Edit DNS Provider — ${provider.name}`;
+        this.toggleDNSProviderFormFields();
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    hideDNSProviderForm() {
+        const panel = document.getElementById('dns-provider-form-panel');
+        if (panel) panel.style.display = 'none';
+    },
+
+    _collectDNSProviderConfig(providerType) {
+        const v = (id) => (document.getElementById(id)?.value ?? '').trim();
+        const config = {};
+        switch (providerType) {
+            case 'cloudflare':
+                if (v('dns-cf-api-token')) config.cloudflare_api_token = v('dns-cf-api-token');
+                config.cloudflare_zone_id = v('dns-cf-zone-id');
+                break;
+            case 'aws_route53':
+                config.aws_hosted_zone_id = v('dns-aws-zone-id');
+                config.aws_region = v('dns-aws-region') || 'us-east-1';
+                break;
+            case 'azure_dns':
+                config.azure_subscription_id = v('dns-az-subscription-id');
+                config.azure_resource_group = v('dns-az-resource-group');
+                config.azure_dns_zone_name = v('dns-az-zone-name');
+                break;
+            case 'ovhcloud':
+                config.ovh_endpoint = v('dns-ovh-endpoint') || 'ovh-eu';
+                if (v('dns-ovh-app-key')) config.ovh_application_key = v('dns-ovh-app-key');
+                if (v('dns-ovh-app-secret')) config.ovh_application_secret = v('dns-ovh-app-secret');
+                if (v('dns-ovh-consumer-key')) config.ovh_consumer_key = v('dns-ovh-consumer-key');
+                config.ovh_dns_zone = v('dns-ovh-dns-zone');
+                break;
+        }
+        return config;
+    },
+
+    async saveDNSProvider() {
+        try {
+            const id = document.getElementById('dns-provider-form-id').value;
+            const providerType = document.getElementById('dns-provider-type').value;
+            const name = document.getElementById('dns-provider-name').value.trim();
+            if (!name) { Toast.warning('Please enter a provider name'); return; }
+
             const data = {
-                dns_provider: document.getElementById('dns_provider').value,
-                cloudflare_api_token: document.getElementById('cloudflare_api_token')?.value || null,
-                cloudflare_zone_id: document.getElementById('cloudflare_zone_id')?.value || null,
-                aws_hosted_zone_id: document.getElementById('aws_hosted_zone_id')?.value || null,
-                aws_region: document.getElementById('aws_region')?.value || null,
-                azure_subscription_id: document.getElementById('azure_subscription_id')?.value || null,
-                azure_resource_group: document.getElementById('azure_resource_group')?.value || null,
-                azure_dns_zone_name: document.getElementById('azure_dns_zone_name')?.value || null,
-                ovh_endpoint: document.getElementById('ovh_endpoint')?.value || 'ovh-eu',
-                ovh_application_key: document.getElementById('ovh_application_key')?.value || null,
-                ovh_application_secret: document.getElementById('ovh_application_secret')?.value || null,
-                ovh_consumer_key: document.getElementById('ovh_consumer_key')?.value || null,
-                ovh_dns_zone: document.getElementById('ovh_dns_zone')?.value || null,
+                name,
+                provider_type: providerType,
+                config: this._collectDNSProviderConfig(providerType),
             };
-            if (!data.cloudflare_api_token) delete data.cloudflare_api_token;
-            if (!data.ovh_application_key) delete data.ovh_application_key;
-            if (!data.ovh_application_secret) delete data.ovh_application_secret;
-            if (!data.ovh_consumer_key) delete data.ovh_consumer_key;
-            await api.updateDNS(data);
-            Toast.success('DNS settings saved');
-        } catch (err) { Toast.error('Failed to save: ' + err.message); }
+
+            if (id) {
+                await api.updateDNSProvider(parseInt(id), data);
+                Toast.success('DNS provider updated');
+            } else {
+                await api.createDNSProvider(data);
+                Toast.success('DNS provider added');
+            }
+
+            this.hideDNSProviderForm();
+            await this.loadDNSProviders();
+            // Refresh ACME providers so the linked DNS name is up to date.
+            this.loadACMEProviders();
+        } catch (err) { Toast.error('Failed to save provider: ' + err.message); }
+    },
+
+    async deleteDNSProvider(id) {
+        const provider = this._dnsProviders.find(p => p.id === id);
+        if (!provider) return;
+        if (!confirm(`Delete DNS provider "${provider.name}"? This cannot be undone.`)) return;
+        try {
+            await api.deleteDNSProvider(id);
+            Toast.success(`DNS provider "${provider.name}" deleted`);
+            this.loadDNSProviders();
+        } catch (err) { Toast.error('Failed to delete: ' + err.message); }
+    },
+
+    async testDNSProvider(id) {
+        try {
+            Toast.info('Testing DNS provider connection...');
+            const result = await api.testDNSProvider(id);
+            if (result.success) Toast.success('DNS connection successful: ' + result.message);
+            else Toast.error('DNS connection failed: ' + result.message);
+        } catch (err) { Toast.error('Test failed: ' + err.message); }
+    },
+
+    async _loadDNSProvidersDropdown(selectedId) {
+        const select = document.getElementById('acme-provider-dns');
+        if (!select) return;
+        try {
+            const providers = this._dnsProviders && this._dnsProviders.length
+                ? this._dnsProviders
+                : await api.getDNSProviders();
+            this._dnsProviders = providers;
+
+            const options = ['<option value="">— None —</option>']
+                .concat(providers.map(p =>
+                    `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${this._escape(p.name)} (${p.provider_type})</option>`
+                ));
+            select.innerHTML = options.join('');
+
+            if (!providers.length) {
+                select.innerHTML = '<option value="">— No DNS providers configured —</option>';
+            }
+        } catch (err) {
+            select.innerHTML = '<option value="">— Failed to load —</option>';
+        }
     },
 
     async saveSMTP() {
@@ -867,15 +1113,6 @@ const Settings = {
             const result = await api.testERS(this._getISEFormData());
             if (result.success) Toast.success('ERS connection successful!');
             else Toast.error('ERS connection failed: ' + result.message);
-        } catch (err) { Toast.error('Test failed: ' + err.message); }
-    },
-
-    async testDNS() {
-        try {
-            Toast.info('Testing DNS provider connection...');
-            const result = await api.testDNS();
-            if (result.success) Toast.success('DNS connection successful: ' + result.message);
-            else Toast.error('DNS connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }
     },
 
