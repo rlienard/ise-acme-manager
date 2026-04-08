@@ -47,6 +47,14 @@ class ISESettings(BaseModel):
     ise_open_api_port: int = Field(443, description="ISE Open API port")
 
 
+class ISETestSettings(BaseModel):
+    ise_host: Optional[str] = Field(None, description="ISE PAN hostname or IP")
+    ise_username: Optional[str] = Field(None, description="ISE admin username")
+    ise_password: Optional[str] = Field(None, description="ISE admin password (falls back to saved if omitted)")
+    ise_ers_port: Optional[int] = Field(None, description="ISE ERS API port")
+    ise_open_api_port: Optional[int] = Field(None, description="ISE Open API port")
+
+
 class ACMESettings(BaseModel):
     acme_provider: ACMEProvider = Field(
         ACMEProvider.DIGICERT,

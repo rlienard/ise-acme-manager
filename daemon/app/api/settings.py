@@ -3,13 +3,14 @@ Settings API endpoints.
 """
 
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db, Settings, ISENode
 from ..config import ConfigManager
 from ..models import (
-    AllSettings, ISESettings, ACMESettings, CertificateSettings,
+    AllSettings, ISESettings, ISETestSettings, ACMESettings, CertificateSettings,
     DNSSettings, SMTPSettings, SchedulerSettings,
     ISENodeCreate, ISENodeResponse, MessageResponse,
     DiscoverNodesResponse, DiscoveredNode, SystemCertificateInfo
@@ -225,17 +226,29 @@ def get_system_certificates(db: Session = Depends(get_db)):
 # ──────────────────────────────
 
 @router.post("/test/ise", response_model=dict)
-def test_ise_connection(db: Session = Depends(get_db)):
-    """Test ISE connectivity."""
+def test_ise_connection(
+    settings: Optional[ISETestSettings] = Body(default=None),
+    db: Session = Depends(get_db)
+):
+    """Test ISE Open API connectivity. Accepts optional form values to test unsaved settings."""
     config = ConfigManager.get_flat(db)
+    if settings:
+        overrides = {k: v for k, v in settings.model_dump().items() if v is not None}
+        config.update(overrides)
     client = ISEClient(config)
     return client.test_connection()
 
 
 @router.post("/test/ers", response_model=dict)
-def test_ers_connection(db: Session = Depends(get_db)):
-    """Test ISE ERS API connectivity."""
+def test_ers_connection(
+    settings: Optional[ISETestSettings] = Body(default=None),
+    db: Session = Depends(get_db)
+):
+    """Test ISE ERS API connectivity. Accepts optional form values to test unsaved settings."""
     config = ConfigManager.get_flat(db)
+    if settings:
+        overrides = {k: v for k, v in settings.model_dump().items() if v is not None}
+        config.update(overrides)
     client = ISEClient(config)
     return client.test_ers_connection()
 

@@ -678,10 +678,22 @@ const Settings = {
 
     // ── Connection Tests ──
 
+    _getISEFormData() {
+        const data = {
+            ise_host: document.getElementById('ise_host').value,
+            ise_username: document.getElementById('ise_username').value,
+            ise_ers_port: parseInt(document.getElementById('ise_ers_port').value),
+            ise_open_api_port: parseInt(document.getElementById('ise_open_api_port').value),
+        };
+        const password = document.getElementById('ise_password').value;
+        if (password) data.ise_password = password;
+        return data;
+    },
+
     async testISE() {
         try {
             Toast.info('Testing ISE connection...');
-            const result = await api.testISE();
+            const result = await api.testISE(this._getISEFormData());
             if (result.success) Toast.success('ISE connection successful!');
             else Toast.error('ISE connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }
@@ -690,7 +702,7 @@ const Settings = {
     async testERS() {
         try {
             Toast.info('Testing ERS connection...');
-            const result = await api.testERS();
+            const result = await api.testERS(this._getISEFormData());
             if (result.success) Toast.success('ERS connection successful!');
             else Toast.error('ERS connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }

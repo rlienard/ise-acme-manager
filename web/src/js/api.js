@@ -51,8 +51,8 @@ const api = {
     getCertificates() { return this.request('GET', '/api/v1/settings/certificates'); },
 
     // Tests
-    testISE() { return this.request('POST', '/api/v1/settings/test/ise'); },
-    testERS() { return this.request('POST', '/api/v1/settings/test/ers'); },
+    testISE(data) { return this.request('POST', '/api/v1/settings/test/ise', data || null); },
+    testERS(data) { return this.request('POST', '/api/v1/settings/test/ers', data || null); },
     testDNS() { return this.request('POST', '/api/v1/settings/test/dns'); },
 
     // Actions
