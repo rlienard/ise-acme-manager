@@ -481,10 +481,25 @@ const Settings = {
         <div id="panel-system" class="settings-panel">
             <div class="settings-section">
                 <h2><i class="fas fa-sliders-h"></i> System Settings</h2>
+
+                <div class="info-banner" style="margin-bottom:1.25rem;padding:0.85rem 1rem;border-left:3px solid var(--accent);background:var(--bg-secondary);border-radius:4px;font-size:0.875rem;line-height:1.55">
+                    <strong><i class="fas fa-network-wired"></i> Global Container DNS</strong><br>
+                    To route <em>all</em> container traffic through a custom DNS server, set the
+                    <code>CUSTOM_DNS_SERVER</code> variable in a <code>.env</code> file next to
+                    <code>docker-compose.yml</code>, then uncomment the <code>dns:</code> line in
+                    <code>docker-compose.yml</code> under the <code>daemon</code> service, and
+                    restart the container (<code>docker compose down &amp;&amp; docker compose up -d</code>).<br>
+                    See <code>.env.example</code> for the full instructions.
+                </div>
+
                 <div class="form-grid">
                     <div class="form-group">
-                        <label>Custom DNS Server <small style="color:var(--text-muted)">(optional — for resolving ISE FQDN)</small></label>
+                        <label>ISE FQDN DNS Override <small style="color:var(--text-muted)">(optional — app-level, no restart needed)</small></label>
                         <input id="ise_dns_server" value="${s.ise?.ise_dns_server || ''}" placeholder="e.g. 192.168.1.53 (leave empty for system default)">
+                        <small style="color:var(--text-muted);margin-top:0.25rem;display:block">
+                            Resolves the ISE hostname using this DNS server inside the application only.
+                            Does not affect other processes in the container.
+                        </small>
                     </div>
                 </div>
                 <div class="btn-group">

@@ -23,6 +23,10 @@ services:
     environment:
       - TZ=Europe/Amsterdam
       - DATA_DIR=/app/data
+    # To override the container's DNS server globally, set CUSTOM_DNS_SERVER in a
+    # .env file (e.g. CUSTOM_DNS_SERVER=192.168.1.53) and uncomment the line below.
+    # Applies to all processes in the container. Requires a container restart.
+    # dns: "${CUSTOM_DNS_SERVER}"
     networks:
       - ise-acme-net
     healthcheck:
