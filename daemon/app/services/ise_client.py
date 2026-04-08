@@ -146,6 +146,43 @@ class ISEClient:
         response.raise_for_status()
         return response.json()
 
+    def export_certificate_for_inspection(self, cert_id: str, node_name: str) -> "tuple":
+        """
+        Download a system certificate from ISE so it can be inspected.
+
+        Only the certificate is exported (never the private key). Returns the
+        raw response body plus the response object so the caller can decode
+        whatever form ISE returned (JSON, PEM, or a binary ZIP).
+        """
+        # Modern ISE (3.1+) exposes a POST /export endpoint that returns a
+        # base64 ZIP. Older / custom builds use a GET node-scoped endpoint
+        # returning JSON with ``certData``. We try them in that order and
+        # surface whichever succeeds.
+        errors: list[str] = []
+
+        post_url = f"{self.base_url}/certs/system-certificate/export"
+        post_payload = {
+            "id": cert_id,
+            "export": "CERTIFICATE",       # cert only — never the private key
+            "password": "",
+        }
+        try:
+            response = self.session.post(post_url, json=post_payload, timeout=60)
+            response.raise_for_status()
+            return response.content, response
+        except Exception as e:
+            errors.append(f"POST /export failed: {e}")
+
+        get_url = f"{self.base_url}/certs/system-certificate/{node_name}/{cert_id}/export"
+        try:
+            response = self.session.get(get_url, timeout=60)
+            response.raise_for_status()
+            return response.content, response
+        except Exception as e:
+            errors.append(f"GET /export failed: {e}")
+
+        raise RuntimeError("; ".join(errors))
+
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
         """Import certificate to a node."""
         url = f"{self.base_url}/certs/system-certificate/{node_name}/import"

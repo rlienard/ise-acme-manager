@@ -13,11 +13,13 @@ from ..models import (
     AllSettings, ISESettings, ISETestSettings, ACMESettings, CertificateSettings,
     DNSSettings, SMTPSettings, SchedulerSettings,
     ISENodeCreate, ISENodeResponse, MessageResponse,
-    DiscoverNodesResponse, DiscoveredNode, SystemCertificateInfo
+    DiscoverNodesResponse, DiscoveredNode, SystemCertificateInfo,
+    InspectedCertificate
 )
 from ..scheduler import configure_scheduler
 from ..services.ise_client import ISEClient
 from ..services.dns_providers import get_dns_provider
+from ..services.cert_inspector import parse_pem_certificate, extract_pem_from_ise_export
 
 router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 
@@ -241,6 +243,95 @@ def get_system_certificates(db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Failed to fetch certificates from any node: {'; '.join(errors)}")
 
     return result
+
+
+@router.get(
+    "/certificates/{node_id}/{cert_id}/inspect",
+    response_model=InspectedCertificate,
+)
+def inspect_system_certificate(node_id: int, cert_id: str, db: Session = Depends(get_db)):
+    """
+    Export a system certificate from ISE, parse it, and return every attribute
+    needed to clone a new managed certificate from it (subject DN, SANs, key
+    type, extensions, etc.).
+    """
+    node = db.query(ISENode).filter(ISENode.id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail=f"ISE node {node_id} not found")
+
+    config = ConfigManager.get_flat(db)
+    client = ISEClient(config)
+
+    try:
+        raw_body, _response = client.export_certificate_for_inspection(cert_id, node.name)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to export certificate from ISE: {e}")
+
+    # Try JSON first (ISE commonly wraps the cert in a JSON body). If that
+    # fails, fall back to treating the body as a raw PEM/ZIP/DER payload.
+    pem_text: Optional[str] = None
+    try:
+        import json
+        parsed_json = json.loads(raw_body.decode("utf-8")) if raw_body else None
+        if parsed_json is not None:
+            pem_text = extract_pem_from_ise_export(parsed_json)
+    except (ValueError, UnicodeDecodeError):
+        pem_text = None
+
+    if pem_text is None:
+        try:
+            pem_text = extract_pem_from_ise_export(raw_body)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not parse certificate export from ISE: {e}",
+            )
+
+    try:
+        parsed = parse_pem_certificate(pem_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse exported certificate: {e}")
+
+    # Look up the ISE list entry to echo back friendly_name and portal tag so
+    # the frontend can pre-populate those too without a second round trip.
+    friendly_name: Optional[str] = None
+    portal_group_tag: Optional[str] = None
+    try:
+        certs = client.get_system_certificates(node.name)
+        for cert in certs:
+            if str(cert.get("id", "")) == str(cert_id):
+                friendly_name = cert.get("friendlyName")
+                portal_group_tag = cert.get("portalGroupTag") or None
+                break
+    except Exception:
+        pass
+
+    return InspectedCertificate(
+        common_name=parsed["common_name"],
+        subject_dn=parsed["subject_dn"],
+        subject=parsed["subject"],
+        issuer_dn=parsed["issuer_dn"],
+        issuer=parsed["issuer"],
+        serial_number=parsed["serial_number"],
+        not_before=parsed["not_before"],
+        not_after=parsed["not_after"],
+        key_type=parsed["key_type"],
+        public_key=parsed["public_key"],
+        signature_algorithm=parsed["signature_algorithm"],
+        version=parsed["version"],
+        san_names=parsed["san_names"],
+        san=parsed["san"],
+        key_usage=parsed["key_usage"],
+        extended_key_usage=parsed["extended_key_usage"],
+        basic_constraints=parsed["basic_constraints"],
+        fingerprint_sha1=parsed["fingerprint_sha1"],
+        fingerprint_sha256=parsed["fingerprint_sha256"],
+        source_cert_id=cert_id,
+        source_node_id=node.id,
+        source_node_name=node.name,
+        friendly_name=friendly_name,
+        portal_group_tag=portal_group_tag,
+    )
 
 
 @router.get("/portal-group-tags", response_model=list[str])

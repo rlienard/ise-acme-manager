@@ -49,6 +49,9 @@ const api = {
 
     // Certificates (fetched from ISE)
     getCertificates() { return this.request('GET', '/api/v1/settings/certificates'); },
+    inspectCertificate(nodeId, certId) {
+        return this.request('GET', `/api/v1/settings/certificates/${nodeId}/${encodeURIComponent(certId)}/inspect`);
+    },
     getPortalGroupTags() { return this.request('GET', '/api/v1/settings/portal-group-tags'); },
 
     // Tests

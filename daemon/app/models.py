@@ -247,6 +247,51 @@ class SystemCertificateInfo(BaseModel):
     portal_group_tag: Optional[str] = None
 
 
+class InspectedCertificate(BaseModel):
+    """
+    Fully-parsed view of a certificate exported from ISE.
+
+    Returned by ``GET /api/v1/settings/certificates/{node_id}/{cert_id}/inspect``
+    so the frontend can pre-populate a new managed certificate with the same
+    subject, SANs, key type, extensions, etc.
+    """
+    # Core identification
+    common_name: str = ""
+    subject_dn: str = ""
+    subject: Dict[str, Any] = Field(default_factory=dict)
+    issuer_dn: str = ""
+    issuer: Dict[str, Any] = Field(default_factory=dict)
+    serial_number: Optional[str] = None
+
+    # Validity
+    not_before: Optional[str] = None
+    not_after: Optional[str] = None
+
+    # Key material
+    key_type: str = "RSA_2048"
+    public_key: Dict[str, Any] = Field(default_factory=dict)
+    signature_algorithm: Optional[str] = None
+    version: Optional[str] = None
+
+    # Extensions
+    san_names: List[str] = Field(default_factory=list)
+    san: Dict[str, List[str]] = Field(default_factory=dict)
+    key_usage: List[str] = Field(default_factory=list)
+    extended_key_usage: List[str] = Field(default_factory=list)
+    basic_constraints: Optional[Dict[str, Any]] = None
+
+    # Fingerprints
+    fingerprint_sha1: Optional[str] = None
+    fingerprint_sha256: Optional[str] = None
+
+    # ISE-side metadata echoed back for convenience
+    source_cert_id: Optional[str] = None
+    source_node_id: Optional[int] = None
+    source_node_name: Optional[str] = None
+    friendly_name: Optional[str] = None
+    portal_group_tag: Optional[str] = None
+
+
 # ──────────────────────────────────────
 # Status Models
 # ──────────────────────────────────────

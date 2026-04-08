@@ -312,6 +312,15 @@ const Settings = {
                 <!-- Add/Edit Form (hidden by default) -->
                 <div id="cert-form-panel" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.25rem">
                     <h3 style="font-size:0.95rem; margin-bottom:1rem" id="cert-form-title">Add Certificate</h3>
+                    <div id="cert-inspected-panel" style="display:none; margin-bottom:1rem; padding:0.75rem 1rem; background:var(--surface-alt, rgba(0,0,0,0.03)); border:1px solid var(--border); border-radius:6px">
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem">
+                            <strong style="font-size:0.85rem"><i class="fas fa-info-circle"></i> Inspected from ISE certificate</strong>
+                            <button type="button" class="btn btn-outline btn-sm" style="padding:2px 8px; font-size:0.7rem" onclick="Settings.hideInspectedPanel()">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <div id="cert-inspected-body" style="font-size:0.78rem; color:var(--text-muted); font-family:monospace; white-space:pre-wrap; line-height:1.5"></div>
+                    </div>
                     <input type="hidden" id="cert-form-id">
                     <div class="form-grid">
                         <div class="form-group">
@@ -1260,10 +1269,13 @@ const Settings = {
         }
     },
 
-    showCertFormFromISE(idx) {
+    async showCertFormFromISE(idx) {
         const cert = this._iseCertsCache[idx];
         if (!cert) return;
-        const prefill = {
+
+        // Start with whatever the ISE list endpoint already gave us — this is
+        // a best-effort fallback in case the inspect call below fails.
+        const fallback = {
             common_name: this._extractCN(cert.subject),
             san_names: cert.san_names || [],
             key_type: this._normalizeKeyType(cert.key_type),
@@ -1273,7 +1285,39 @@ const Settings = {
             enabled: true,
             node_ids: cert.node_id ? [cert.node_id] : [],
         };
-        this.showCertForm(prefill);
+
+        if (!cert.node_id || !cert.id) {
+            // Nothing to export against — fall back to list-only prefill.
+            this.showCertForm(fallback);
+            return;
+        }
+
+        // Export the cert from ISE, inspect it, and use the parsed data to
+        // populate the form. This is the authoritative source for CN, SANs,
+        // key type, subject DN, EKU and other extensions.
+        Toast.info('Exporting certificate from ISE and inspecting...');
+        try {
+            const inspected = await api.inspectCertificate(cert.node_id, cert.id);
+            const prefill = {
+                common_name: inspected.common_name || fallback.common_name,
+                san_names: (inspected.san_names && inspected.san_names.length)
+                    ? inspected.san_names
+                    : fallback.san_names,
+                key_type: inspected.key_type || fallback.key_type,
+                portal_group_tag: inspected.portal_group_tag || fallback.portal_group_tag,
+                certificate_mode: 'shared',
+                renewal_threshold_days: 30,
+                enabled: true,
+                node_ids: fallback.node_ids,
+                _inspected: inspected,
+            };
+            await this.showCertForm(prefill);
+            Toast.success('Certificate inspected — form pre-populated');
+        } catch (err) {
+            console.warn('Certificate inspection failed, falling back to list data:', err);
+            Toast.warning('Could not inspect certificate: ' + err.message + ' — using list data instead');
+            await this.showCertForm(fallback);
+        }
     },
 
     _normalizeKeyType(keyType) {
@@ -1354,11 +1398,67 @@ const Settings = {
         panel.style.display = 'block';
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+        this._renderInspectedPanel(prefill._inspected || null);
+
         await Promise.all([
             this._loadNodeCheckboxes(prefill.node_ids || []),
             this._loadACMEProvidersDropdown(prefill.acme_provider_id || null),
             this._loadPortalGroupTagsDropdown(prefill.portal_group_tag || 'Default Portal Certificate Group'),
         ]);
+    },
+
+    _renderInspectedPanel(inspected) {
+        const panel = document.getElementById('cert-inspected-panel');
+        const body = document.getElementById('cert-inspected-body');
+        if (!panel || !body) return;
+        if (!inspected) {
+            panel.style.display = 'none';
+            body.innerHTML = '';
+            return;
+        }
+
+        const rows = [];
+        const push = (label, value) => {
+            if (value === undefined || value === null || value === '') return;
+            if (Array.isArray(value)) {
+                if (!value.length) return;
+                value = value.join(', ');
+            }
+            rows.push(`<div><span style="color:var(--text)"><strong>${this._escape(label)}:</strong></span> ${this._escape(String(value))}</div>`);
+        };
+
+        push('Friendly Name', inspected.friendly_name);
+        push('Subject DN', inspected.subject_dn);
+        push('Common Name', inspected.common_name);
+        push('SAN (DNS)', inspected.san && inspected.san.dns);
+        push('SAN (IP)', inspected.san && inspected.san.ip);
+        push('SAN (Email)', inspected.san && inspected.san.email);
+        push('SAN (URI)', inspected.san && inspected.san.uri);
+        push('Issuer', inspected.issuer_dn);
+        push('Serial', inspected.serial_number);
+        push('Valid From', inspected.not_before);
+        push('Valid Until', inspected.not_after);
+        if (inspected.public_key) {
+            const pk = inspected.public_key;
+            const pkDesc = [pk.algorithm, pk.curve, pk.key_size ? `${pk.key_size}-bit` : null]
+                .filter(Boolean).join(' / ');
+            push('Public Key', pkDesc);
+        }
+        push('Signature Algorithm', inspected.signature_algorithm);
+        push('Key Usage', inspected.key_usage);
+        push('Extended Key Usage', inspected.extended_key_usage);
+        if (inspected.basic_constraints) {
+            push('Basic Constraints', `CA=${inspected.basic_constraints.ca}${inspected.basic_constraints.path_length != null ? ', pathLen=' + inspected.basic_constraints.path_length : ''}`);
+        }
+        push('SHA-256 Fingerprint', inspected.fingerprint_sha256);
+
+        body.innerHTML = rows.join('');
+        panel.style.display = 'block';
+    },
+
+    hideInspectedPanel() {
+        const panel = document.getElementById('cert-inspected-panel');
+        if (panel) panel.style.display = 'none';
     },
 
     async editManagedCert(id) {
@@ -1383,6 +1483,8 @@ const Settings = {
 
             panel.style.display = 'block';
             panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+            this._renderInspectedPanel(null);
 
             const assignedIds = cert.nodes.map(n => n.id);
             await Promise.all([
