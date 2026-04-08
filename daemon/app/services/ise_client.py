@@ -152,36 +152,53 @@ class ISEClient:
 
         Only the certificate is exported (never the private key). Returns the
         raw response body plus the response object so the caller can decode
-        whatever form ISE returned (JSON, PEM, or a binary ZIP).
-        """
-        # Modern ISE (3.1+) exposes a POST /export endpoint that returns a
-        # base64 ZIP. Older / custom builds use a GET node-scoped endpoint
-        # returning JSON with ``certData``. We try them in that order and
-        # surface whichever succeeds.
-        errors: list[str] = []
+        whatever form ISE returned (PEM or a binary ZIP).
 
+        The modern ISE (3.1+) Open API exposes a single endpoint for this:
+        ``POST /api/v1/certs/system-certificate/export``. The response body is
+        a binary ZIP archive containing the certificate.
+        """
         post_url = f"{self.base_url}/certs/system-certificate/export"
+        # Per the ISE Open API schema (see ciscoisesdk ExportSystemCertificate
+        # request schema), only ``id`` and ``export`` are required. ``password``
+        # must only be sent when exporting the private key, and when sent it
+        # has to be at least 8 alphanumeric characters — an empty string is
+        # rejected with HTTP 400 by newer ISE builds.
         post_payload = {
             "id": cert_id,
-            "export": "CERTIFICATE",       # cert only — never the private key
-            "password": "",
+            "export": "CERTIFICATE",  # cert only — never the private key
         }
+        # The export endpoint returns a binary ZIP, not JSON. The session's
+        # default ``Accept: application/json`` header would make some ISE
+        # versions reject the request, so override it for this call.
+        headers = {"Accept": "application/octet-stream, application/zip, */*"}
         try:
-            response = self.session.post(post_url, json=post_payload, timeout=60)
+            response = self.session.post(
+                post_url,
+                json=post_payload,
+                headers=headers,
+                timeout=60,
+                stream=True,
+            )
             response.raise_for_status()
             return response.content, response
-        except Exception as e:
-            errors.append(f"POST /export failed: {e}")
-
-        get_url = f"{self.base_url}/certs/system-certificate/{node_name}/{cert_id}/export"
-        try:
-            response = self.session.get(get_url, timeout=60)
-            response.raise_for_status()
-            return response.content, response
-        except Exception as e:
-            errors.append(f"GET /export failed: {e}")
-
-        raise RuntimeError("; ".join(errors))
+        except requests.exceptions.HTTPError as e:
+            # Pull the ISE error body into the exception so the UI can show
+            # the real reason (e.g. "password must be at least 8 chars")
+            # instead of a bare "400 Client Error".
+            detail = ""
+            if e.response is not None:
+                try:
+                    detail = e.response.text.strip()
+                except Exception:
+                    detail = ""
+            status = e.response.status_code if e.response is not None else "?"
+            raise RuntimeError(
+                f"POST {post_url} returned HTTP {status}"
+                + (f": {detail}" if detail else "")
+            ) from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"POST {post_url} failed: {e}") from e
 
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
         """Import certificate to a node."""
