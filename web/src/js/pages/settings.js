@@ -794,6 +794,7 @@ const Settings = {
     async loadNodes() {
         try {
             const nodes = await api.getNodes();
+            this._loadRequestNodeCheckboxes();
             const container = document.getElementById('nodes-list');
             if (!container) return;
 
