@@ -680,6 +680,9 @@ const Settings = {
                     </div>
                 </div>
                 <div class="btn-group">
+                    <button class="btn btn-secondary btn-sm" onclick="Settings.testSMTP()">
+                        <i class="fas fa-paper-plane"></i> Test Settings
+                    </button>
                     <button class="btn btn-primary btn-sm" onclick="Settings.saveSMTP()">
                         <i class="fas fa-save"></i> Save SMTP Settings
                     </button>
@@ -1296,18 +1299,31 @@ const Settings = {
         }
     },
 
+    _getSMTPFormData() {
+        const recipientsInput = document.getElementById('alert_recipients').value;
+        const data = {
+            smtp_server: document.getElementById('smtp_server').value || null,
+            smtp_port: parseInt(document.getElementById('smtp_port').value),
+            smtp_username: document.getElementById('smtp_username').value || null,
+            smtp_password: document.getElementById('smtp_password').value || null,
+            alert_recipients: recipientsInput ? recipientsInput.split(',').map(s => s.trim()).filter(Boolean) : [],
+        };
+        if (!data.smtp_password) delete data.smtp_password;
+        return data;
+    },
+
+    async testSMTP() {
+        try {
+            Toast.info('Sending test email...');
+            const result = await api.testSMTP(this._getSMTPFormData());
+            if (result.success) Toast.success(result.message);
+            else Toast.error('Test failed: ' + result.message);
+        } catch (err) { Toast.error('Test failed: ' + err.message); }
+    },
+
     async saveSMTP() {
         try {
-            const recipientsInput = document.getElementById('alert_recipients').value;
-            const data = {
-                smtp_server: document.getElementById('smtp_server').value || null,
-                smtp_port: parseInt(document.getElementById('smtp_port').value),
-                smtp_username: document.getElementById('smtp_username').value || null,
-                smtp_password: document.getElementById('smtp_password').value || null,
-                alert_recipients: recipientsInput ? recipientsInput.split(',').map(s => s.trim()).filter(Boolean) : [],
-            };
-            if (!data.smtp_password) delete data.smtp_password;
-            await api.updateSMTP(data);
+            await api.updateSMTP(this._getSMTPFormData());
             Toast.success('SMTP settings saved');
         } catch (err) { Toast.error('Failed to save: ' + err.message); }
     },

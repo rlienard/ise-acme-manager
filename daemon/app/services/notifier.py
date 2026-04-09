@@ -30,14 +30,11 @@ class EmailNotifier:
         msg["Subject"] = f"[ISE ACME] {subject}"
         msg.attach(MIMEText(body, "html"))
 
-        try:
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.username, self.password)
-                server.send_message(msg)
-            logger.info(f"Email sent: {subject}")
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}")
+        with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+            server.starttls()
+            server.login(self.username, self.password)
+            server.send_message(msg)
+        logger.info(f"Email sent: {subject}")
 
     def send_renewal_report(self, results: dict, common_name: str, mode: str):
         all_success = all(r.get("status") in ("ok", "renewed") for r in results.values())

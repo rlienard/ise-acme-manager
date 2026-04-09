@@ -58,6 +58,7 @@ const api = {
     testISE(data) { return this.request('POST', '/api/v1/settings/test/ise', data || null); },
     testERS(data) { return this.request('POST', '/api/v1/settings/test/ers', data || null); },
     testDNS() { return this.request('POST', '/api/v1/settings/test/dns'); },
+    testSMTP(data) { return this.request('POST', '/api/v1/settings/test/smtp', data || null); },
 
     // Actions
     triggerAction(action, modeOverride = null) {

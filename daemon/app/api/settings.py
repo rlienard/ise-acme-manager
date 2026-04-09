@@ -20,6 +20,7 @@ from ..scheduler import configure_scheduler
 from ..services.ise_client import ISEClient
 from ..services.dns_providers import get_dns_provider
 from ..services.cert_inspector import parse_pem_certificate, extract_pem_from_ise_export
+from ..services.notifier import EmailNotifier
 
 router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 
@@ -380,6 +381,28 @@ def test_ers_connection(
         config.update(overrides)
     client = ISEClient(config)
     return client.test_ers_connection()
+
+
+@router.post("/test/smtp", response_model=dict)
+def test_smtp_connection(
+    settings: Optional[SMTPSettings] = Body(default=None),
+    db: Session = Depends(get_db)
+):
+    """Test SMTP settings by sending a test email. Accepts optional form values to test unsaved settings."""
+    config = ConfigManager.get_flat(db)
+    if settings:
+        overrides = {k: v for k, v in settings.model_dump().items() if v is not None}
+        config.update(overrides)
+
+    notifier = EmailNotifier(config)
+    if not notifier.smtp_server or not notifier.recipients:
+        return {"success": False, "message": "SMTP server and at least one recipient are required"}
+
+    try:
+        notifier.send("Test Email", "<p>This is a test email from <strong>ISE ACME Manager</strong>. Your SMTP settings are working correctly.</p>")
+        return {"success": True, "message": f"Test email sent to {', '.join(notifier.recipients)}"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 @router.post("/test/dns", response_model=dict)
