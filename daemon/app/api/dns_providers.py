@@ -7,8 +7,9 @@ when running the DNS-01 challenge for that ACME provider's certificates.
 
 import json
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from ..database import get_db, DNSProvider, ACMEProvider
 from ..models import (
@@ -17,7 +18,11 @@ from ..models import (
     DNSProviderResponse,
     MessageResponse,
 )
-from ..services.dns_providers import build_dns_client, DNS_SECRET_KEYS
+from ..services.dns_providers import (
+    build_dns_client,
+    DNS_SECRET_KEYS,
+    ovh_request_consumer_key,
+)
 
 router = APIRouter(prefix="/api/v1/dns-providers", tags=["dns-providers"])
 
@@ -156,3 +161,69 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
         return client.test_connection()
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+class OVHConsumerKeyRequest(BaseModel):
+    application_key: Optional[str] = Field(None, description="OVH Application Key")
+    application_secret: Optional[str] = Field(None, description="OVH Application Secret")
+    endpoint: Optional[str] = Field("ovh-eu", description="OVH API endpoint")
+    dns_zone: Optional[str] = Field(None, description="DNS zone to scope the consumer key to")
+    provider_id: Optional[int] = Field(None, description="Existing DNS provider id to reuse stored credentials from")
+
+
+@router.post("/ovh/request-consumer-key", response_model=dict)
+def ovh_request_consumer_key_endpoint(
+    data: OVHConsumerKeyRequest,
+    db: Session = Depends(get_db),
+):
+    """Request an OVHcloud Consumer Key scoped with the permissions needed
+    for DNS-01 challenge automation.
+
+    The user must visit the returned ``validation_url`` and approve the
+    permissions before the Consumer Key becomes valid.
+    """
+    app_key = data.application_key or ""
+    app_secret = data.application_secret or ""
+    endpoint = data.endpoint or "ovh-eu"
+    zone = (data.dns_zone or "").strip()
+
+    # Fall back to credentials stored on an existing provider so the user
+    # doesn't have to retype them when editing an OVH provider.
+    if data.provider_id is not None and (not app_key or not app_secret):
+        stored = db.query(DNSProvider).filter(DNSProvider.id == data.provider_id).first()
+        if stored is not None:
+            cfg = _load_config(stored)
+            if not app_key:
+                app_key = cfg.get("ovh_application_key", "") or ""
+            if not app_secret:
+                app_secret = cfg.get("ovh_application_secret", "") or ""
+            if not zone:
+                zone = (cfg.get("ovh_dns_zone", "") or "").strip()
+            if not data.endpoint:
+                endpoint = cfg.get("ovh_endpoint", "ovh-eu") or "ovh-eu"
+
+    if not app_key or not app_secret:
+        raise HTTPException(
+            status_code=400,
+            detail="OVH application key and application secret are required",
+        )
+
+    try:
+        result = ovh_request_consumer_key(
+            application_key=app_key,
+            application_secret=app_secret,
+            endpoint=endpoint,
+            zone_name=zone,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to request consumer key: {e}")
+
+    if not result.get("consumer_key") or not result.get("validation_url"):
+        raise HTTPException(status_code=502, detail="OVH did not return a consumer key and validation URL")
+
+    return {
+        "success": True,
+        "consumer_key": result["consumer_key"],
+        "validation_url": result["validation_url"],
+        "message": "Open the validation URL and approve the permissions, then save the provider.",
+    }

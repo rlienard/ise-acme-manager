@@ -121,6 +121,52 @@ class AzureDNS:
             return {"success": False, "message": str(e)}
 
 
+def _ovh_access_rules(zone_name: str = "") -> list:
+    """Build the list of OVH API access rules needed for DNS-01 management.
+
+    If a specific zone is supplied we scope to that zone; otherwise we grant
+    access to all DNS zones on the account.
+    """
+    scope = f"/domain/zone/{zone_name}" if zone_name else "/domain/zone/*"
+    return [
+        {"method": "GET", "path": scope},
+        {"method": "GET", "path": f"{scope}/*"},
+        {"method": "POST", "path": f"{scope}/record"},
+        {"method": "POST", "path": f"{scope}/refresh"},
+        {"method": "DELETE", "path": f"{scope}/record/*"},
+    ]
+
+
+def ovh_request_consumer_key(
+    application_key: str,
+    application_secret: str,
+    endpoint: str = "ovh-eu",
+    zone_name: str = "",
+) -> dict:
+    """Request a new OVH Consumer Key with the access rules required for
+    DNS-01 automation.
+
+    Returns a dict with ``consumer_key`` and ``validation_url``. The key is
+    unusable until the user opens the validation URL and approves the
+    permissions.
+    """
+    import ovh
+
+    if not application_key or not application_secret:
+        raise ValueError("OVH application key and secret are required")
+
+    client = ovh.Client(
+        endpoint=endpoint or "ovh-eu",
+        application_key=application_key,
+        application_secret=application_secret,
+    )
+    result = client.request_consumerkey(_ovh_access_rules(zone_name))
+    return {
+        "consumer_key": result.get("consumerKey"),
+        "validation_url": result.get("validationUrl"),
+    }
+
+
 class OVHCloudDNS:
     def __init__(self, config: dict):
         import ovh
@@ -152,11 +198,27 @@ class OVHCloudDNS:
         logger.info(f"DNS TXT deleted: {record_id}")
 
     def test_connection(self) -> dict:
+        if not self.zone_name:
+            return {"success": False, "message": "No DNS zone configured for this provider"}
         try:
             zone_info = self.client.get(f"/domain/zone/{self.zone_name}")
             return {"success": True, "message": f"Connected to OVHcloud zone: {zone_info.get('name', self.zone_name)}"}
         except Exception as e:
-            return {"success": False, "message": str(e)}
+            # Surface a clearer message for the most common OVH errors so the
+            # user knows what to do next.
+            msg = str(e)
+            lowered = msg.lower()
+            if "not granted" in lowered or "invalidcredential" in lowered or "not valid" in lowered:
+                hint = (
+                    "The OVHcloud Consumer Key is missing permissions for "
+                    f"/domain/zone/{self.zone_name}. Use 'Request Consumer Key' "
+                    "to generate one with the required access and approve it "
+                    "via the validation URL."
+                )
+                return {"success": False, "message": f"{msg} — {hint}"}
+            if "does not exist" in lowered or "object not found" in lowered or "404" in lowered:
+                return {"success": False, "message": f"DNS zone '{self.zone_name}' not found on this OVHcloud account ({msg})"}
+            return {"success": False, "message": msg}
 
 
 def get_dns_provider(config: dict):

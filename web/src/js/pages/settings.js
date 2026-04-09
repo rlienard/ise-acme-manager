@@ -495,10 +495,20 @@ const Settings = {
                         <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
                             <label>Consumer Key</label>
                             <input id="dns-ovh-consumer-key" type="password" placeholder="Enter consumer key">
+                            <small class="form-help">
+                                OVHcloud Consumer Keys must be granted access to <code>/domain/zone/*</code>.
+                                Use <b>Request Consumer Key</b> below to generate one with the correct permissions.
+                            </small>
                         </div>
                         <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
                             <label>DNS Zone</label>
                             <input id="dns-ovh-dns-zone" placeholder="example.com">
+                        </div>
+                        <div class="form-group dns-provider-field dns-provider-ovhcloud" style="display:none">
+                            <button class="btn btn-outline btn-sm" type="button" onclick="Settings.requestOVHConsumerKey()">
+                                <i class="fas fa-key"></i> Request Consumer Key
+                            </button>
+                            <div id="dns-ovh-ck-result" class="form-help" style="display:none;margin-top:8px;"></div>
                         </div>
                     </div>
                     <div class="btn-group">
@@ -916,6 +926,10 @@ const Settings = {
         if (awsRegion) awsRegion.value = 'us-east-1';
         const ovhEp = document.getElementById('dns-ovh-endpoint');
         if (ovhEp) ovhEp.value = 'ovh-eu';
+        const ovhCk = document.getElementById('dns-ovh-consumer-key');
+        if (ovhCk) ovhCk.type = 'password';
+        const ckResult = document.getElementById('dns-ovh-ck-result');
+        if (ckResult) { ckResult.style.display = 'none'; ckResult.innerHTML = ''; }
         if (title) title.textContent = 'Add DNS Provider';
         this.toggleDNSProviderFormFields();
         panel.style.display = 'block';
@@ -951,8 +965,11 @@ const Settings = {
         document.getElementById('dns-ovh-app-secret').value = '';
         document.getElementById('dns-ovh-app-secret').placeholder = cfg.ovh_application_secret ? 'Leave blank to keep existing secret' : 'Enter application secret';
         document.getElementById('dns-ovh-consumer-key').value = '';
+        document.getElementById('dns-ovh-consumer-key').type = 'password';
         document.getElementById('dns-ovh-consumer-key').placeholder = cfg.ovh_consumer_key ? 'Leave blank to keep existing key' : 'Enter consumer key';
         document.getElementById('dns-ovh-dns-zone').value = cfg.ovh_dns_zone || '';
+        const ckResult = document.getElementById('dns-ovh-ck-result');
+        if (ckResult) { ckResult.style.display = 'none'; ckResult.innerHTML = ''; }
 
         if (title) title.textContent = `Edit DNS Provider — ${provider.name}`;
         this.toggleDNSProviderFormFields();
@@ -1039,6 +1056,60 @@ const Settings = {
             if (result.success) Toast.success('DNS connection successful: ' + result.message);
             else Toast.error('DNS connection failed: ' + result.message);
         } catch (err) { Toast.error('Test failed: ' + err.message); }
+    },
+
+    async requestOVHConsumerKey() {
+        const v = (id) => (document.getElementById(id)?.value ?? '').trim();
+        const editingId = v('dns-provider-form-id');
+        const payload = {
+            endpoint: v('dns-ovh-endpoint') || 'ovh-eu',
+            dns_zone: v('dns-ovh-dns-zone') || null,
+        };
+        const appKey = v('dns-ovh-app-key');
+        const appSecret = v('dns-ovh-app-secret');
+        if (appKey) payload.application_key = appKey;
+        if (appSecret) payload.application_secret = appSecret;
+        if (editingId) payload.provider_id = parseInt(editingId);
+
+        // Require credentials either in the form or in an existing provider
+        // record we can reuse.
+        if (!editingId && (!appKey || !appSecret)) {
+            Toast.warning('Enter application key and secret first, or save the provider before requesting a key');
+            return;
+        }
+
+        const resultEl = document.getElementById('dns-ovh-ck-result');
+        try {
+            Toast.info('Requesting OVHcloud consumer key...');
+            const result = await api.requestOVHConsumerKey(payload);
+            if (!result.success || !result.consumer_key || !result.validation_url) {
+                throw new Error(result.message || 'Unexpected response from OVHcloud');
+            }
+            // Auto-fill the consumer key field with the newly issued (but
+            // unvalidated) key so the user can save it straight away.
+            const ckField = document.getElementById('dns-ovh-consumer-key');
+            if (ckField) {
+                ckField.value = result.consumer_key;
+                ckField.type = 'text';
+            }
+            if (resultEl) {
+                resultEl.style.display = 'block';
+                resultEl.innerHTML =
+                    '<b>Consumer key issued.</b> Open the validation URL, log into OVHcloud, ' +
+                    'approve the permissions, then click <b>Save Provider</b>.<br>' +
+                    '<a href="' + this._escape(result.validation_url) + '" target="_blank" rel="noopener noreferrer">' +
+                    this._escape(result.validation_url) + '</a>';
+            }
+            // Open the validation URL for the user.
+            window.open(result.validation_url, '_blank', 'noopener');
+            Toast.success('Consumer key issued — validate it via the opened URL, then save');
+        } catch (err) {
+            if (resultEl) {
+                resultEl.style.display = 'block';
+                resultEl.textContent = 'Failed: ' + err.message;
+            }
+            Toast.error('Failed to request consumer key: ' + err.message);
+        }
     },
 
     async _loadDNSProvidersDropdown(selectedId) {

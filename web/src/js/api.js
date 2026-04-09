@@ -98,4 +98,5 @@ const api = {
     updateDNSProvider(id, data) { return this.request('PUT', `/api/v1/dns-providers/${id}`, data); },
     deleteDNSProvider(id) { return this.request('DELETE', `/api/v1/dns-providers/${id}`); },
     testDNSProvider(id) { return this.request('POST', `/api/v1/dns-providers/${id}/test`); },
+    requestOVHConsumerKey(data) { return this.request('POST', '/api/v1/dns-providers/ovh/request-consumer-key', data); },
 };
