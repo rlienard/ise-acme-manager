@@ -205,18 +205,48 @@ class ISEClient:
             raise RuntimeError(f"POST {post_url} failed: {e}") from e
 
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
-        """Import certificate to a node."""
-        url = f"{self.base_url}/certs/system-certificate/{node_name}/import"
+        """
+        Import a certificate to an ISE node.
+
+        The modern ISE (3.1+) Open API exposes a single endpoint for this:
+        ``POST /api/v1/certs/system-certificate/import``. The node is
+        identified by the ``name`` field in the JSON body — it is **not**
+        part of the URL path. Older ``/certs/system-certificate/{node}/import``
+        paths do not accept POST and will return HTTP 405.
+        """
+        url = f"{self.base_url}/certs/system-certificate/import"
         payload = {
-            "certData": cert_data.get("certData"),
+            "name": node_name,
+            "data": cert_data.get("certData") or cert_data.get("data"),
             "privateKeyData": cert_data.get("privateKeyData"),
-            "usedBy": "Portal",
+            "portal": True,
             "portalGroupTag": portal_group_tag,
-            "allowExtendedValidity": True
+            "allowExtendedValidity": True,
+            "allowReplacementOfCertificates": True,
+            "allowReplacementOfPortalGroupTag": True,
+            "allowPortalTagTransferForSameSubject": True,
+            "allowRoleTransferForSameSubject": True,
+            "validateCertificateExtensions": False,
         }
-        response = self.session.post(url, json=payload, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = self.session.post(url, json=payload, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            # Surface ISE's error body so the UI shows the real reason
+            # (e.g. "Certificate already exists") instead of a bare
+            # "405 Client Error".
+            detail = ""
+            if e.response is not None:
+                try:
+                    detail = e.response.text.strip()
+                except Exception:
+                    detail = ""
+            status = e.response.status_code if e.response is not None else "?"
+            raise RuntimeError(
+                f"POST {url} returned HTTP {status}"
+                + (f": {detail}" if detail else "")
+            ) from e
 
     def bind_certificate_to_portal(self, cert_id: str, portal_group_tag: str, node_name: str) -> dict:
         """Bind certificate to guest portal."""
