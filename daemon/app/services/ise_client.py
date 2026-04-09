@@ -160,13 +160,17 @@ class ISEClient:
         """
         post_url = f"{self.base_url}/certs/system-certificate/export"
         # Per the ISE Open API schema (see ciscoisesdk ExportSystemCertificate
-        # request schema), only ``id`` and ``export`` are required. ``password``
-        # must only be sent when exporting the private key, and when sent it
-        # has to be at least 8 alphanumeric characters — an empty string is
-        # rejected with HTTP 400 by newer ISE builds.
+        # request schema), ``id``, ``export`` and ``hostName`` are required.
+        # ``hostName`` identifies the node that owns the certificate — without
+        # it newer ISE builds reject the call with HTTP 400
+        # ("HostName should not be null"). ``password`` must only be sent when
+        # exporting the private key, and when sent it has to be at least 8
+        # alphanumeric characters — an empty string is rejected with HTTP 400
+        # by newer ISE builds.
         post_payload = {
             "id": cert_id,
             "export": "CERTIFICATE",  # cert only — never the private key
+            "hostName": node_name,
         }
         # The export endpoint returns a binary ZIP, not JSON. The session's
         # default ``Accept: application/json`` header would make some ISE
