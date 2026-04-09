@@ -3,12 +3,49 @@ Cisco ISE API Client — handles all ISE interactions.
 """
 
 import logging
+import secrets
+import string
+
 import requests
 import urllib3
+from cryptography.hazmat.primitives import serialization
 from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
+
+
+def _encrypt_private_key(private_key_pem: str) -> "tuple[str, str]":
+    """
+    Re-serialize a PEM private key as an encrypted PKCS#8 blob.
+
+    Cisco ISE's ``POST /api/v1/certs/system-certificate/import`` endpoint
+    rejects unencrypted private keys with a generic "Security Check
+    Failed" error. LetsEncrypt issues unencrypted keys, so we wrap the
+    key with a one-shot random passphrase and send the passphrase in
+    the ``password`` field of the import payload.
+
+    Returns ``(encrypted_pem, password)``. If the key is already in
+    encrypted form the caller should skip this helper.
+    """
+    # 12-character alphanumeric passphrase — ISE rejects passwords that
+    # are shorter than 8 chars or contain non-alphanumerics.
+    alphabet = string.ascii_letters + string.digits
+    password = "".join(secrets.choice(alphabet) for _ in range(16))
+
+    key = serialization.load_pem_private_key(
+        private_key_pem.encode("utf-8") if isinstance(private_key_pem, str)
+        else private_key_pem,
+        password=None,
+    )
+    encrypted_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.BestAvailableEncryption(
+            password.encode("utf-8")
+        ),
+    ).decode("utf-8")
+    return encrypted_pem, password
 
 
 class ISEClient:
@@ -215,6 +252,17 @@ class ISEClient:
         paths do not accept POST and will return HTTP 405.
         """
         url = f"{self.base_url}/certs/system-certificate/import"
+
+        # ISE's import endpoint rejects unencrypted private keys with a
+        # generic "Security Check Failed" error. LetsEncrypt (and any
+        # freshly generated key from our ACME client) returns the key in
+        # plain PKCS#8, so we wrap it in encrypted PKCS#8 here and send
+        # the generated passphrase in the ``password`` field.
+        private_key_pem = cert_data.get("privateKeyData")
+        password = cert_data.get("password") or ""
+        if private_key_pem and "ENCRYPTED" not in private_key_pem.split("\n", 1)[0]:
+            private_key_pem, password = _encrypt_private_key(private_key_pem)
+
         # Note: every ``allow*`` boolean must be supplied explicitly.
         # Newer ISE builds reject the request with HTTP 400
         # ("allowSHA1Certificates, must not be null" etc.) when any of
@@ -222,7 +270,8 @@ class ISEClient:
         payload = {
             "name": node_name,
             "data": cert_data.get("certData") or cert_data.get("data"),
-            "privateKeyData": cert_data.get("privateKeyData"),
+            "privateKeyData": private_key_pem,
+            "password": password,
             "portal": True,
             "portalGroupTag": portal_group_tag,
             "admin": False,
