@@ -864,6 +864,7 @@ const Settings = {
         try {
             const providers = await api.getACMEProviders();
             this._acmeProviders = providers;
+            this._loadRequestACMEProvidersDropdown();
             if (!container) return;
             if (!providers.length) {
                 container.innerHTML = '<p style="color:var(--text-muted); font-size:0.875rem">No ACME providers configured yet. Click "Add Provider" to create one.</p>';
@@ -1960,7 +1961,7 @@ const Settings = {
             }
             container.innerHTML = nodes.map(node => `
                 <label style="display:flex; align-items:center; gap:6px; font-size:0.875rem; cursor:pointer">
-                    <input type="checkbox" class="req-node-cb" value="${node.id}" ${selectedIds.includes(node.id) ? 'checked' : ''}>
+                    <input type="checkbox" class="req-node-cb" value="${node.id}" ${(selectedIds.length ? selectedIds.includes(node.id) : node.enabled) ? 'checked' : ''}>
                     ${node.name} <span class="badge ${node.is_primary ? 'success' : 'neutral'}" style="font-size:0.7rem">${node.is_primary ? 'PRIMARY' : node.role}</span>
                 </label>`).join('');
         } catch (err) {
