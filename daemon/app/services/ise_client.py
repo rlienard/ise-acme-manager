@@ -215,13 +215,26 @@ class ISEClient:
         paths do not accept POST and will return HTTP 405.
         """
         url = f"{self.base_url}/certs/system-certificate/import"
+        # Note: every ``allow*`` boolean must be supplied explicitly.
+        # Newer ISE builds reject the request with HTTP 400
+        # ("allowSHA1Certificates, must not be null" etc.) when any of
+        # these fields are omitted.
         payload = {
             "name": node_name,
             "data": cert_data.get("certData") or cert_data.get("data"),
             "privateKeyData": cert_data.get("privateKeyData"),
             "portal": True,
             "portalGroupTag": portal_group_tag,
+            "admin": False,
+            "eap": False,
+            "ims": False,
+            "pxgrid": False,
+            "radius": False,
+            "saml": False,
             "allowExtendedValidity": True,
+            "allowOutOfDateCert": False,
+            "allowSHA1Certificates": False,
+            "allowWildCardCertificates": True,
             "allowReplacementOfCertificates": True,
             "allowReplacementOfPortalGroupTag": True,
             "allowPortalTagTransferForSameSubject": True,
