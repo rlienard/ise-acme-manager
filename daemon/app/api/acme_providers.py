@@ -13,6 +13,7 @@ from ..models import (
     ACMEProviderResponse,
     MessageResponse,
 )
+from ..services.acme_client import test_acme_provider
 
 router = APIRouter(prefix="/api/v1/acme-providers", tags=["acme-providers"])
 
@@ -117,6 +118,29 @@ def update_provider(provider_id: int, data: ACMEProviderUpdate, db: Session = De
     db.commit()
     db.refresh(provider)
     return _to_response(provider)
+
+
+@router.post("/{provider_id}/test", response_model=dict)
+def test_provider(provider_id: int, db: Session = Depends(get_db)):
+    """Validate an ACME provider configuration without issuing a certificate.
+
+    Fetches the directory URL, checks the required RFC 8555 endpoints,
+    pulls a fresh nonce, and (for Let's Encrypt) registers or looks up the
+    account so a misconfigured directory URL or wrong account email is
+    surfaced before the next renewal run.
+    """
+    provider = _get_or_404(provider_id, db)
+    try:
+        return test_acme_provider(
+            provider_type=provider.provider_type,
+            directory_url=provider.directory_url,
+            account_email=provider.account_email,
+            account_key_pem=provider.account_key,
+            kid=provider.kid,
+            hmac_key=provider.hmac_key,
+        )
+    except Exception as e:
+        return {"success": False, "message": f"Test failed: {e}"}
 
 
 @router.delete("/{provider_id}", response_model=MessageResponse)

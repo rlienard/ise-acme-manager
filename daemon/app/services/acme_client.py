@@ -20,7 +20,7 @@ from cryptography import x509
 
 logger = logging.getLogger(__name__)
 
-LETSENCRYPT_DIRECTORY = "https://acme-api.letsencrypt.org/directory"
+LETSENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory"
 LETSENCRYPT_STAGING_DIRECTORY = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 
@@ -374,3 +374,215 @@ class ACMEv2Client:
             time.sleep(interval)
             elapsed += interval
         raise TimeoutError(f"Order not ready after {max_wait}s")
+
+
+# ── Provider connectivity test ─────────────────────────────────
+
+# Endpoints any RFC 8555 directory must expose. We use this list to detect
+# directory URLs that respond with JSON but aren't actually ACME servers.
+_REQUIRED_DIRECTORY_KEYS = ("newAccount", "newOrder", "newNonce")
+
+
+def test_acme_provider(
+    provider_type: str,
+    directory_url: str,
+    account_email: str | None = None,
+    account_key_pem: str | None = None,
+    kid: str | None = None,
+    hmac_key: str | None = None,
+) -> dict:
+    """Validate an ACME provider configuration end-to-end (no cert issued).
+
+    The test runs the same handshake an actual renewal would perform up to
+    the point of creating an order:
+
+    1. Fetch the directory URL and check it exposes the required RFC 8555
+       endpoints.
+    2. Pull a fresh nonce from ``newNonce`` to confirm the server is alive.
+    3. For LetsEncrypt only, register or look up the account using the
+       configured email + account key. This is the safest way to detect a
+       mismatched directory URL (e.g. a "letsencrypt" provider that's still
+       pointing at DigiCert) because LetsEncrypt is the only flow we drive
+       end-to-end from this daemon.
+
+    Returns ``{"success": bool, "message": str, "details": {...}}`` and never
+    raises — failures are reported via ``success=False`` so the API layer
+    can surface a clean message to the UI.
+    """
+    details: dict = {"directory_url": directory_url, "provider_type": provider_type}
+
+    if not directory_url:
+        return {
+            "success": False,
+            "message": "ACME directory URL is empty",
+            "details": details,
+        }
+
+    # ── 1. Directory metadata ─────────────────────────────
+    try:
+        resp = requests.get(directory_url, timeout=15)
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "message": f"Could not reach ACME directory: {e}",
+            "details": details,
+        }
+
+    if resp.status_code != 200:
+        return {
+            "success": False,
+            "message": (
+                f"ACME directory returned HTTP {resp.status_code}. "
+                "Verify the directory URL — for Let's Encrypt it should be "
+                "https://acme-v02.api.letsencrypt.org/directory (or the "
+                "staging URL https://acme-staging-v02.api.letsencrypt.org/directory)."
+            ),
+            "details": details,
+        }
+
+    try:
+        directory = resp.json()
+    except ValueError:
+        return {
+            "success": False,
+            "message": "ACME directory did not return JSON — wrong URL?",
+            "details": details,
+        }
+
+    missing = [k for k in _REQUIRED_DIRECTORY_KEYS if k not in directory]
+    if missing:
+        return {
+            "success": False,
+            "message": (
+                f"Directory is missing required ACME endpoint(s): {', '.join(missing)}. "
+                "This usually means the URL is not an RFC 8555 directory."
+            ),
+            "details": details,
+        }
+
+    details["endpoints"] = {k: directory.get(k) for k in _REQUIRED_DIRECTORY_KEYS}
+    details["meta"] = directory.get("meta") or {}
+
+    # Cross-check provider_type vs the directory host so a "letsencrypt"
+    # provider pointed at DigiCert (the bug that motivates this feature)
+    # is flagged before we even hit newNonce.
+    host = (directory_url or "").lower()
+    if provider_type == "letsencrypt" and "letsencrypt" not in host:
+        return {
+            "success": False,
+            "message": (
+                "Directory URL does not look like a Let's Encrypt endpoint. "
+                "Expected something under acme-v02.api.letsencrypt.org or "
+                "acme-staging-v02.api.letsencrypt.org."
+            ),
+            "details": details,
+        }
+    if provider_type == "digicert" and "digicert" not in host:
+        return {
+            "success": False,
+            "message": (
+                "Directory URL does not look like a DigiCert endpoint. "
+                "Expected something under acme.digicert.com."
+            ),
+            "details": details,
+        }
+
+    # ── 2. Fresh nonce ────────────────────────────────────
+    new_nonce_url = directory.get("newNonce")
+    try:
+        nonce_resp = requests.head(new_nonce_url, timeout=15)
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "message": f"Could not fetch a nonce from {new_nonce_url}: {e}",
+            "details": details,
+        }
+    if "Replay-Nonce" not in nonce_resp.headers:
+        return {
+            "success": False,
+            "message": (
+                f"newNonce endpoint did not return a Replay-Nonce header "
+                f"(HTTP {nonce_resp.status_code}). The server may not be a "
+                "valid ACME directory."
+            ),
+            "details": details,
+        }
+
+    # ── 3. Provider-specific credential checks ────────────
+    if provider_type == "letsencrypt":
+        if not account_email:
+            return {
+                "success": False,
+                "message": (
+                    "Directory reachable, but no account email is configured. "
+                    "Let's Encrypt requires an account email."
+                ),
+                "details": details,
+            }
+        try:
+            client = ACMEv2Client(
+                directory_url=directory_url,
+                account_email=account_email,
+                account_key_pem=account_key_pem or None,
+            )
+            account_url = client.register_account()
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            try:
+                body = e.response.text if e.response is not None else ""
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "message": (
+                    f"Account registration failed: {e}. "
+                    f"{body[:300] if body else ''}"
+                ).strip(),
+                "details": details,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Account registration failed: {e}",
+                "details": details,
+            }
+
+        details["account_url"] = account_url
+        return {
+            "success": True,
+            "message": (
+                f"Connected to Let's Encrypt directory and "
+                f"{'reused existing' if account_key_pem else 'registered new'} "
+                f"account for {account_email}"
+            ),
+            "details": details,
+        }
+
+    if provider_type == "digicert":
+        meta = details.get("meta") or {}
+        eab_required = bool(meta.get("externalAccountRequired"))
+        if eab_required and (not kid or not hmac_key):
+            return {
+                "success": False,
+                "message": (
+                    "DigiCert directory reachable, but it requires External "
+                    "Account Binding and the Key ID / HMAC key are not "
+                    "configured on this provider."
+                ),
+                "details": details,
+            }
+        return {
+            "success": True,
+            "message": (
+                "Connected to DigiCert ACME directory. "
+                + ("EAB credentials present." if (kid and hmac_key) else "No EAB credentials configured.")
+            ),
+            "details": details,
+        }
+
+    # Unknown provider — directory is at least valid ACME.
+    return {
+        "success": True,
+        "message": "ACME directory reachable and exposes the required endpoints.",
+        "details": details,
+    }

@@ -633,6 +633,22 @@ const Settings = {
         document.querySelectorAll(`.acme-provider-${providerType}`).forEach(el => el.style.display = 'flex');
         // <small> helper text is inline; force it to block when shown
         document.querySelectorAll(`small.acme-provider-${providerType}`).forEach(el => el.style.display = 'block');
+
+        // If the directory URL still matches the *other* provider's default,
+        // swap it for the matching default. This guards against the easy
+        // mistake of switching the type to "letsencrypt" while leaving the
+        // DigiCert directory URL in place — which would otherwise blow up at
+        // renewal time with a 502 from acme.digicert.com.
+        const urlField = document.getElementById('acme-provider-directory-url');
+        if (!urlField) return;
+        const DIGICERT_URL = 'https://acme.digicert.com/v2/acme/directory/';
+        const LETSENCRYPT_URL = 'https://acme-v02.api.letsencrypt.org/directory';
+        const current = (urlField.value || '').trim();
+        if (providerType === 'letsencrypt' && current === DIGICERT_URL) {
+            urlField.value = LETSENCRYPT_URL;
+        } else if (providerType === 'digicert' && current === LETSENCRYPT_URL) {
+            urlField.value = DIGICERT_URL;
+        }
     },
 
     toggleDNSProviderFormFields() {
@@ -739,6 +755,9 @@ const Settings = {
                             <td>
                                 <button class="btn btn-outline btn-sm" onclick="Settings.editACMEProvider(${p.id})">
                                     <i class="fas fa-edit"></i>
+                                </button>
+                                <button class="btn btn-outline btn-sm" onclick="Settings.testACMEProvider(${p.id})" title="Test ACME directory and credentials">
+                                    <i class="fas fa-plug"></i>
                                 </button>
                                 <button class="btn btn-danger btn-sm" onclick="Settings.deleteACMEProvider(${p.id})">
                                     <i class="fas fa-trash"></i>
@@ -853,6 +872,20 @@ const Settings = {
             Toast.success(`Provider "${provider.name}" deleted`);
             this.loadACMEProviders();
         } catch (err) { Toast.error('Failed to delete: ' + err.message); }
+    },
+
+    async testACMEProvider(id) {
+        const provider = this._acmeProviders.find(p => p.id === id);
+        const label = provider ? provider.name : `#${id}`;
+        try {
+            Toast.info(`Testing ACME provider "${label}"...`);
+            const result = await api.testACMEProvider(id);
+            if (result.success) {
+                Toast.success(`ACME test OK — ${result.message}`);
+            } else {
+                Toast.error(`ACME test failed — ${result.message}`);
+            }
+        } catch (err) { Toast.error('Test failed: ' + err.message); }
     },
 
     // ── DNS Providers ──
