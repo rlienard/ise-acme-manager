@@ -70,6 +70,91 @@ def _split_pem_chain(pem_chain: str) -> "list[str]":
     )
 
 
+def _resolve_issuer_chain(pem_block: str) -> "list[str]":
+    """Follow AIA CA Issuers URLs to discover parent certificates.
+
+    ACME providers (e.g. Let's Encrypt) include intermediates in the
+    downloaded chain but typically omit the root CA.  ISE requires the
+    issuer of every imported certificate to already be present in its
+    trusted store, so we need the full chain up to the root.
+
+    Starting from *pem_block*, this function reads the Authority
+    Information Access (AIA) extension, downloads the issuer
+    certificate, and repeats until it reaches a self-signed root or
+    no more AIA URLs are available.
+
+    Returns a list of PEM-encoded certificates (excluding the input),
+    ordered from closest issuer to root.
+    """
+    chain: "list[str]" = []
+    seen: "set[str]" = set()
+    current_pem = pem_block
+
+    for _ in range(5):  # safety limit to prevent infinite loops
+        try:
+            cert_obj = x509.load_pem_x509_certificate(
+                (current_pem.strip() + "\n").encode("utf-8")
+            )
+        except Exception:
+            break
+
+        # Self-signed → root CA reached, nothing more to fetch.
+        if cert_obj.issuer == cert_obj.subject:
+            break
+
+        # Extract CA Issuers URL from the AIA extension.
+        try:
+            aia = cert_obj.extensions.get_extension_for_class(
+                x509.AuthorityInformationAccess
+            )
+            issuer_urls = [
+                desc.access_location.value
+                for desc in aia.value
+                if desc.access_method
+                == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+            ]
+        except x509.ExtensionNotFound:
+            break
+
+        if not issuer_urls:
+            break
+
+        issuer_url = issuer_urls[0]
+        if issuer_url in seen:
+            break  # avoid loops
+        seen.add(issuer_url)
+
+        try:
+            resp = requests.get(issuer_url, timeout=10)
+            resp.raise_for_status()
+        except Exception:
+            logger.warning(
+                "Could not fetch issuer certificate from %s", issuer_url
+            )
+            break
+
+        # The response is typically DER-encoded; convert to PEM.
+        body = resp.content
+        if b"-----BEGIN CERTIFICATE-----" in body:
+            issuer_pem = body.decode("utf-8").strip()
+        else:
+            try:
+                issuer_cert = x509.load_der_x509_certificate(body)
+                issuer_pem = issuer_cert.public_bytes(
+                    serialization.Encoding.PEM
+                ).decode("utf-8").strip()
+            except Exception:
+                logger.warning(
+                    "Could not parse issuer certificate from %s", issuer_url
+                )
+                break
+
+        chain.append(issuer_pem)
+        current_pem = issuer_pem
+
+    return chain
+
+
 class ISEClient:
     """Handles all Cisco ISE API interactions."""
 
@@ -293,17 +378,19 @@ class ISEClient:
             raise RuntimeError(f"POST {post_url} failed: {e}") from e
 
     def _ensure_intermediates_trusted(self, pem_chain: str) -> None:
-        """Upload intermediate CA certificates to ISE's trusted store.
+        """Upload intermediate and root CA certificates to ISE's trusted store.
 
         ISE must already trust every certificate in the chain above the
         leaf in order for ``system-certificate/import`` to succeed.
-        Let's Encrypt (and most ACME CAs) include the intermediates in
-        the downloaded chain, but ISE's trusted store may not contain
-        them.
+        ACME providers (e.g. Let's Encrypt) include the intermediates in
+        the downloaded chain but typically omit the root CA.  ISE
+        requires the issuer of every imported certificate to already be
+        present in its trusted store, so we resolve the full chain up to
+        the root via AIA (Authority Information Access) extensions and
+        import certificates from root down.
 
-        Each intermediate is submitted individually.  If ISE already has
-        the certificate, the call returns HTTP 409 (conflict) — we
-        silently ignore that.
+        If ISE already has a certificate, the call returns HTTP 409
+        (conflict) — we silently ignore that.
         """
         blocks = _split_pem_chain(pem_chain)
         if len(blocks) <= 1:
@@ -311,6 +398,22 @@ class ISEClient:
             return
 
         intermediates = blocks[1:]  # everything after the leaf
+
+        # Follow AIA CA Issuers on the topmost intermediate to discover
+        # any parent certificates (including the root CA) that are not
+        # in the ACME chain but required by ISE's trust validation.
+        extra = _resolve_issuer_chain(intermediates[-1])
+        if extra:
+            logger.info(
+                "Resolved %d additional issuer certificate(s) via AIA",
+                len(extra),
+            )
+            intermediates.extend(extra)
+
+        # Import from root down so that each certificate's issuer is
+        # already trusted by ISE when we upload the next one.
+        intermediates = list(reversed(intermediates))
+
         url = f"{self.base_url}/certs/trusted-certificate/import"
 
         csrf_token = self._fetch_csrf_token()
