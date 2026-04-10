@@ -90,16 +90,28 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
     seen: "set[str]" = set()
     current_pem = pem_block
 
-    for _ in range(5):  # safety limit to prevent infinite loops
+    for iteration in range(5):  # safety limit to prevent infinite loops
         try:
             cert_obj = x509.load_pem_x509_certificate(
                 (current_pem.strip() + "\n").encode("utf-8")
             )
-        except Exception:
+            cn_attrs = cert_obj.subject.get_attributes_for_oid(
+                x509.oid.NameOID.COMMON_NAME
+            )
+            current_cn = cn_attrs[0].value if cn_attrs else "(no CN)"
+        except Exception as exc:
+            logger.warning(
+                "AIA chain resolution: failed to parse PEM certificate "
+                "at iteration %d: %s", iteration, exc,
+            )
             break
 
         # Self-signed → root CA reached, nothing more to fetch.
         if cert_obj.issuer == cert_obj.subject:
+            logger.info(
+                "AIA chain resolution: reached self-signed root CA '%s'",
+                current_cn,
+            )
             break
 
         # Extract CA Issuers URL from the AIA extension.
@@ -114,9 +126,21 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
                 == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
             ]
         except x509.ExtensionNotFound:
+            logger.warning(
+                "AIA chain resolution: certificate '%s' has no AIA extension; "
+                "cannot discover its issuer. The root CA may need to be "
+                "imported into ISE manually.",
+                current_cn,
+            )
             break
 
         if not issuer_urls:
+            logger.warning(
+                "AIA chain resolution: AIA extension on '%s' contains no "
+                "CA Issuers URLs; cannot discover its issuer. The root CA "
+                "may need to be imported into ISE manually.",
+                current_cn,
+            )
             break
 
         issuer_url = issuer_urls[0]
@@ -124,12 +148,19 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
             break  # avoid loops
         seen.add(issuer_url)
 
+        logger.info(
+            "AIA chain resolution: fetching issuer of '%s' from %s",
+            current_cn, issuer_url,
+        )
         try:
             resp = requests.get(issuer_url, timeout=10)
             resp.raise_for_status()
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Could not fetch issuer certificate from %s", issuer_url
+                "AIA chain resolution: failed to fetch issuer certificate "
+                "for '%s' from %s: %s. The root CA may need to be imported "
+                "into ISE manually.",
+                current_cn, issuer_url, exc,
             )
             break
 
@@ -143,15 +174,43 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
                 issuer_pem = issuer_cert.public_bytes(
                     serialization.Encoding.PEM
                 ).decode("utf-8").strip()
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "Could not parse issuer certificate from %s", issuer_url
+                    "AIA chain resolution: could not parse certificate "
+                    "fetched for '%s' from %s: %s. The root CA may need "
+                    "to be imported into ISE manually.",
+                    current_cn, issuer_url, exc,
                 )
                 break
+
+        # Identify the resolved issuer for logging.
+        try:
+            iss_obj = x509.load_pem_x509_certificate(
+                (issuer_pem + "\n").encode("utf-8")
+            )
+            iss_cn_attrs = iss_obj.subject.get_attributes_for_oid(
+                x509.oid.NameOID.COMMON_NAME
+            )
+            issuer_cn = iss_cn_attrs[0].value if iss_cn_attrs else "(no CN)"
+        except Exception:
+            issuer_cn = "(unknown)"
+        logger.info(
+            "AIA chain resolution: discovered issuer '%s' for '%s'",
+            issuer_cn, current_cn,
+        )
 
         chain.append(issuer_pem)
         current_pem = issuer_pem
 
+    if chain:
+        logger.info(
+            "AIA chain resolution: resolved %d additional certificate(s)",
+            len(chain),
+        )
+    else:
+        logger.info(
+            "AIA chain resolution: no additional certificates discovered"
+        )
     return chain
 
 
@@ -404,15 +463,36 @@ class ISEClient:
         # in the ACME chain but required by ISE's trust validation.
         extra = _resolve_issuer_chain(intermediates[-1])
         if extra:
-            logger.info(
-                "Resolved %d additional issuer certificate(s) via AIA",
-                len(extra),
-            )
             intermediates.extend(extra)
 
         # Import from root down so that each certificate's issuer is
         # already trusted by ISE when we upload the next one.
         intermediates = list(reversed(intermediates))
+
+        # Log the full chain that will be imported (root-first order).
+        total = len(intermediates)
+        logger.info(
+            "Will import %d CA certificate(s) into ISE trusted store "
+            "(root-first order):", total,
+        )
+        for i, blk in enumerate(intermediates):
+            try:
+                c = x509.load_pem_x509_certificate(
+                    (blk + "\n").encode("utf-8")
+                )
+                subj_attrs = c.subject.get_attributes_for_oid(
+                    x509.oid.NameOID.COMMON_NAME
+                )
+                subj = subj_attrs[0].value if subj_attrs else "(no CN)"
+                iss_attrs = c.issuer.get_attributes_for_oid(
+                    x509.oid.NameOID.COMMON_NAME
+                )
+                iss = iss_attrs[0].value if iss_attrs else "(no CN)"
+                logger.info(
+                    "  [%d/%d] Subject: %s | Issuer: %s", i + 1, total, subj, iss,
+                )
+            except Exception:
+                logger.info("  [%d/%d] (could not parse certificate)", i + 1, total)
 
         url = f"{self.base_url}/certs/trusted-certificate/import"
 
@@ -445,15 +525,25 @@ class ISEClient:
                 "trustForIseAuth": True,
                 "validateCertificateExtensions": False,
             }
+            logger.info(
+                "Importing CA certificate [%d/%d] '%s' into ISE trusted store...",
+                idx + 1, total, friendly,
+            )
             try:
                 resp = self.session.post(url, json=payload, headers=csrf_headers, timeout=30)
                 resp.raise_for_status()
-                logger.info("Imported intermediate CA '%s' into ISE trusted store", friendly)
+                logger.info(
+                    "Successfully imported CA [%d/%d] '%s'",
+                    idx + 1, total, friendly,
+                )
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else "?"
                 if status == 409:
                     # Certificate already exists in ISE's trusted store.
-                    logger.debug("Intermediate CA '%s' already trusted by ISE", friendly)
+                    logger.info(
+                        "CA [%d/%d] '%s' already exists in ISE trusted store",
+                        idx + 1, total, friendly,
+                    )
                 else:
                     detail = ""
                     if exc.response is not None:
@@ -461,17 +551,18 @@ class ISEClient:
                             detail = exc.response.text.strip()
                         except Exception:
                             detail = ""
-                    hint = ""
-                    if "(staging)" in friendly.lower():
-                        hint = (
-                            ". This is a Let's Encrypt STAGING intermediate — "
-                            "staging CA chains are not accepted by ISE. "
-                            "Switch the ACME provider's directory URL to the "
-                            "production endpoint: "
-                            "https://acme-v02.api.letsencrypt.org/directory"
-                        )
+                    logger.error(
+                        "Failed to import CA [%d/%d] '%s' (HTTP %s): %s",
+                        idx + 1, total, friendly, status, detail or "(empty)",
+                    )
+                    hint = (
+                        ". Verify that the issuer (parent CA) of this "
+                        "certificate is already present in ISE's trusted "
+                        "certificate store. If the root CA is missing, "
+                        "import it manually before retrying."
+                    )
                     raise RuntimeError(
-                        f"Failed to import intermediate CA '{friendly}' "
+                        f"Failed to import CA '{friendly}' "
                         f"into ISE trusted store (HTTP {status})"
                         + (f": {detail}" if detail else "")
                         + hint

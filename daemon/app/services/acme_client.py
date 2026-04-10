@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import time
 
 import requests
@@ -357,7 +358,34 @@ class ACMEv2Client:
         cert_resp = self._post(cert_url, payload=None)
         cert_pem = cert_resp.text
 
-        logger.info(f"Certificate obtained for {common_name}")
+        # Log the downloaded certificate chain for diagnostics.
+        pem_blocks = re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            cert_pem,
+            re.DOTALL,
+        )
+        logger.info(
+            "Certificate obtained for %s — chain contains %d certificate(s)",
+            common_name, len(pem_blocks),
+        )
+        for idx, block in enumerate(pem_blocks):
+            try:
+                cert_obj = x509.load_pem_x509_certificate(
+                    (block.strip() + "\n").encode("utf-8")
+                )
+                subj_cn = cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+                iss_cn = cert_obj.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+                is_self_signed = cert_obj.issuer == cert_obj.subject
+                logger.info(
+                    "  [%d] Subject: %s | Issuer: %s%s",
+                    idx,
+                    subj_cn[0].value if subj_cn else "(no CN)",
+                    iss_cn[0].value if iss_cn else "(no CN)",
+                    " (self-signed root)" if is_self_signed else "",
+                )
+            except Exception:
+                logger.info("  [%d] (could not parse certificate)", idx)
+
         return cert_pem, cert_key_pem
 
     def _poll_order_ready(self, order_url: str, max_wait: int = 180,

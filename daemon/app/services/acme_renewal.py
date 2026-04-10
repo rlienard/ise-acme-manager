@@ -379,11 +379,9 @@ class ACMERenewalEngine:
         """Build an ACMEv2Client, persisting the account key on first use."""
         dir_url = config.get("acme_directory_url") or ""
         if "acme-staging" in dir_url.lower():
-            logger.warning(
-                "ACME provider is using a Let's Encrypt STAGING directory URL "
-                "(%s). Staging certificates use fake CA chains that cannot be "
-                "imported into Cisco ISE. For production use, switch to "
-                "https://acme-v02.api.letsencrypt.org/directory",
+            logger.info(
+                "ACME provider is using a Let's Encrypt staging directory URL "
+                "(%s). Staging certificates are intended for testing only.",
                 dir_url,
             )
         account_key_pem = config.get("acme_account_key") or None
