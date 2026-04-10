@@ -98,8 +98,18 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
         except Exception:
             break
 
+        # Derive a short label for log messages.
+        try:
+            cn_attrs = cert_obj.subject.get_attributes_for_oid(
+                x509.oid.NameOID.COMMON_NAME
+            )
+            subject_label = cn_attrs[0].value if cn_attrs else "(unknown)"
+        except Exception:
+            subject_label = "(unknown)"
+
         # Self-signed → root CA reached, nothing more to fetch.
         if cert_obj.issuer == cert_obj.subject:
+            logger.debug("AIA chain walk: '%s' is self-signed (root), stopping", subject_label)
             break
 
         # Extract CA Issuers URL from the AIA extension.
@@ -114,9 +124,16 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
                 == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
             ]
         except x509.ExtensionNotFound:
+            logger.debug(
+                "AIA chain walk: '%s' has no AIA extension, stopping", subject_label
+            )
             break
 
         if not issuer_urls:
+            logger.debug(
+                "AIA chain walk: '%s' has no CA Issuers URL in AIA, stopping",
+                subject_label,
+            )
             break
 
         issuer_url = issuer_urls[0]
@@ -124,12 +141,21 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
             break  # avoid loops
         seen.add(issuer_url)
 
+        logger.info(
+            "AIA chain walk: downloading issuer of '%s' from %s",
+            subject_label,
+            issuer_url,
+        )
         try:
             resp = requests.get(issuer_url, timeout=10)
             resp.raise_for_status()
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Could not fetch issuer certificate from %s", issuer_url
+                "AIA chain walk: could not fetch issuer certificate for '%s' "
+                "from %s: %s",
+                subject_label,
+                issuer_url,
+                exc,
             )
             break
 
@@ -143,11 +169,32 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
                 issuer_pem = issuer_cert.public_bytes(
                     serialization.Encoding.PEM
                 ).decode("utf-8").strip()
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "Could not parse issuer certificate from %s", issuer_url
+                    "AIA chain walk: could not parse issuer certificate for '%s' "
+                    "from %s: %s",
+                    subject_label,
+                    issuer_url,
+                    exc,
                 )
                 break
+
+        # Log the CN of the discovered issuer for traceability.
+        try:
+            issuer_cert_obj = x509.load_pem_x509_certificate(
+                (issuer_pem + "\n").encode("utf-8")
+            )
+            issuer_cn_attrs = issuer_cert_obj.subject.get_attributes_for_oid(
+                x509.oid.NameOID.COMMON_NAME
+            )
+            issuer_label = issuer_cn_attrs[0].value if issuer_cn_attrs else "(unknown)"
+        except Exception:
+            issuer_label = "(unknown)"
+        logger.info(
+            "AIA chain walk: resolved issuer '%s' for '%s'",
+            issuer_label,
+            subject_label,
+        )
 
         chain.append(issuer_pem)
         current_pem = issuer_pem
@@ -402,13 +449,45 @@ class ISEClient:
         # Follow AIA CA Issuers on the topmost intermediate to discover
         # any parent certificates (including the root CA) that are not
         # in the ACME chain but required by ISE's trust validation.
-        extra = _resolve_issuer_chain(intermediates[-1])
+        # Track the AIA URL attempted so we can surface it in errors.
+        aia_hint = ""
+        top_cert_pem = intermediates[-1]
+        try:
+            top_cert_obj = x509.load_pem_x509_certificate(
+                (top_cert_pem.strip() + "\n").encode("utf-8")
+            )
+            if top_cert_obj.issuer != top_cert_obj.subject:
+                # Non-root: look for the CA Issuers URL for error messages.
+                try:
+                    aia_ext = top_cert_obj.extensions.get_extension_for_class(
+                        x509.AuthorityInformationAccess
+                    )
+                    urls = [
+                        d.access_location.value
+                        for d in aia_ext.value
+                        if d.access_method
+                        == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+                    ]
+                    if urls:
+                        aia_hint = urls[0]
+                except x509.ExtensionNotFound:
+                    pass
+        except Exception:
+            pass
+
+        extra = _resolve_issuer_chain(top_cert_pem)
         if extra:
             logger.info(
                 "Resolved %d additional issuer certificate(s) via AIA",
                 len(extra),
             )
             intermediates.extend(extra)
+        elif aia_hint:
+            logger.warning(
+                "Could not resolve issuer chain via AIA (%s); "
+                "ISE import will fail if the root CA is not already trusted.",
+                aia_hint,
+            )
 
         # Import from root down so that each certificate's issuer is
         # already trusted by ISE when we upload the next one.
@@ -448,12 +527,12 @@ class ISEClient:
             try:
                 resp = self.session.post(url, json=payload, headers=csrf_headers, timeout=30)
                 resp.raise_for_status()
-                logger.info("Imported intermediate CA '%s' into ISE trusted store", friendly)
+                logger.info("Imported CA certificate '%s' into ISE trusted store", friendly)
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else "?"
                 if status == 409:
                     # Certificate already exists in ISE's trusted store.
-                    logger.debug("Intermediate CA '%s' already trusted by ISE", friendly)
+                    logger.debug("CA certificate '%s' already trusted by ISE", friendly)
                 else:
                     detail = ""
                     if exc.response is not None:
@@ -461,6 +540,18 @@ class ISEClient:
                             detail = exc.response.text.strip()
                         except Exception:
                             detail = ""
+<<<<<<< claude/fix-letsencrypt-staging-import-2Q8Dw
+                    # When ISE returns "Security Check Failed" it usually
+                    # means the certificate's issuer is not yet in its trust
+                    # store.  Give the operator a hint about the AIA URL so
+                    # they can diagnose network-reachability problems.
+                    aia_note = (
+                        f" (Root CA could not be fetched automatically from "
+                        f"{aia_hint} — check that the daemon can reach this URL)"
+                        if aia_hint and not extra
+                        else ""
+                    )
+=======
                     hint = ""
                     if "(staging)" in friendly.lower():
                         hint = (
@@ -470,11 +561,16 @@ class ISEClient:
                             "production endpoint: "
                             "https://acme-v02.api.letsencrypt.org/directory"
                         )
+>>>>>>> main
                     raise RuntimeError(
-                        f"Failed to import intermediate CA '{friendly}' "
+                        f"Failed to import CA certificate '{friendly}' "
                         f"into ISE trusted store (HTTP {status})"
                         + (f": {detail}" if detail else "")
+<<<<<<< claude/fix-letsencrypt-staging-import-2Q8Dw
+                        + aia_note
+=======
                         + hint
+>>>>>>> main
                     ) from exc
 
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
