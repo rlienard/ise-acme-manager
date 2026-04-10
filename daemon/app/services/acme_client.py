@@ -358,6 +358,11 @@ class ACMEv2Client:
         cert_resp = self._post(cert_url, payload=None)
         cert_pem = cert_resp.text
 
+        # For staging environments whose root CA is not in any device
+        # trust store, prefer an alternate chain that includes the
+        # self-signed root (RFC 8555 §7.4.2 Link rel="alternate").
+        cert_pem = self._prefer_chain_with_root(cert_pem, cert_resp)
+
         # Log the downloaded certificate chain for diagnostics.
         pem_blocks = re.findall(
             r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
@@ -387,6 +392,91 @@ class ACMEv2Client:
                 logger.info("  [%d] (could not parse certificate)", idx)
 
         return cert_pem, cert_key_pem
+
+    def _prefer_chain_with_root(
+        self, cert_pem: str, cert_resp: requests.Response,
+    ) -> str:
+        """Return a chain that includes the self-signed root, if available.
+
+        ACME servers may offer alternate certificate chains via ``Link``
+        headers (RFC 8555 §7.4.2).  For staging environments such as
+        Let's Encrypt staging, the root CA is not in any device trust
+        store.  An alternate chain that extends to the self-signed root
+        lets the ISE import flow add the root to the trusted store
+        without relying on AIA URLs (which may serve certificates from
+        a different chain path).
+
+        If the default chain already contains a self-signed root or no
+        alternate chain is available, the original *cert_pem* is
+        returned unchanged.
+        """
+        blocks = re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            cert_pem,
+            re.DOTALL,
+        )
+        if len(blocks) < 2:
+            return cert_pem
+
+        # Check if the default chain already ends with a self-signed root.
+        try:
+            top = x509.load_pem_x509_certificate(
+                (blocks[-1].strip() + "\n").encode("utf-8")
+            )
+            if top.issuer == top.subject:
+                return cert_pem  # already has root
+        except Exception:
+            return cert_pem
+
+        # Parse alternate chain URL(s) from Link headers.
+        alt_urls: list[str] = []
+        for part in cert_resp.headers.get("Link", "").split(","):
+            part = part.strip()
+            if 'rel="alternate"' in part:
+                m = re.search(r"<([^>]+)>", part)
+                if m:
+                    alt_urls.append(m.group(1))
+
+        for alt_url in alt_urls:
+            try:
+                alt_resp = self._post(alt_url, payload=None)
+                alt_pem = alt_resp.text
+                alt_blocks = re.findall(
+                    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                    alt_pem,
+                    re.DOTALL,
+                )
+                if len(alt_blocks) < 2:
+                    continue
+                alt_top = x509.load_pem_x509_certificate(
+                    (alt_blocks[-1].strip() + "\n").encode("utf-8")
+                )
+                if alt_top.issuer == alt_top.subject:
+                    top_cn = alt_top.subject.get_attributes_for_oid(
+                        NameOID.COMMON_NAME
+                    )
+                    logger.info(
+                        "Default chain has %d cert(s) without self-signed "
+                        "root. Using alternate chain with %d cert(s) "
+                        "including self-signed root '%s'.",
+                        len(blocks),
+                        len(alt_blocks),
+                        top_cn[0].value if top_cn else "(no CN)",
+                    )
+                    return alt_pem
+            except Exception as exc:
+                logger.info(
+                    "Could not fetch alternate chain from %s: %s",
+                    alt_url, exc,
+                )
+
+        logger.info(
+            "No alternate chain with self-signed root found; "
+            "using default chain (%d certificate(s)). "
+            "The root CA will be resolved via AIA.",
+            len(blocks),
+        )
+        return cert_pem
 
     def _poll_order_ready(self, order_url: str, max_wait: int = 180,
                           interval: int = 5) -> str:
