@@ -71,6 +71,108 @@ def _split_pem_chain(pem_chain: str) -> "list[str]":
     )
 
 
+def _get_aki(cert_obj: x509.Certificate) -> "bytes | None":
+    """Extract the Authority Key Identifier (key_identifier bytes), or *None*."""
+    try:
+        ext = cert_obj.extensions.get_extension_for_class(
+            x509.AuthorityKeyIdentifier
+        )
+        return ext.value.key_identifier
+    except x509.ExtensionNotFound:
+        return None
+
+
+def _get_ski(cert_obj: x509.Certificate) -> "bytes | None":
+    """Extract the Subject Key Identifier (digest bytes), or *None*."""
+    try:
+        ext = cert_obj.extensions.get_extension_for_class(
+            x509.SubjectKeyIdentifier
+        )
+        return ext.value.digest
+    except x509.ExtensionNotFound:
+        return None
+
+
+def _build_chain_from_downloaded(pem_blocks: "list[str]") -> "list[str]":
+    """Build the ordered CA certificate chain from downloaded PEM blocks.
+
+    Given a list of PEM blocks where the first element is the leaf
+    certificate and the remaining elements are CA certificates (in the
+    order returned by the ACME server), walk from the leaf upward by
+    matching each certificate's Authority Key Identifier (AKI) to the
+    Subject Key Identifier (SKI) of the next certificate.  When AKI/SKI
+    are not available, fall back to Issuer → Subject name matching.
+
+    Returns the ordered chain of CA certificates (**excluding** the
+    leaf), from closest-to-leaf to closest-to-root.  This is the
+    *actual* trust path embedded in the downloaded certificate chain,
+    which may differ from a path discovered via AIA extensions.
+    """
+    if len(pem_blocks) < 2:
+        return []
+
+    # Parse every block into an x509 object.
+    parsed: "list[tuple[str, x509.Certificate | None]]" = []
+    for block in pem_blocks:
+        try:
+            cert = x509.load_pem_x509_certificate(
+                (block.strip() + "\n").encode("utf-8")
+            )
+            parsed.append((block, cert))
+        except Exception:
+            parsed.append((block, None))
+
+    if parsed[0][1] is None:
+        # Cannot parse the leaf — fall back to positional order.
+        return [b for b, _ in parsed[1:]]
+
+    chain: "list[str]" = []
+    current = parsed[0][1]  # start from the leaf
+    used: "set[int]" = {0}
+
+    for _ in range(len(parsed)):
+        current_aki = _get_aki(current)
+        best_block: "str | None" = None
+        best_cert: "x509.Certificate | None" = None
+        best_idx: "int | None" = None
+
+        for i, (block, cert) in enumerate(parsed):
+            if i in used or cert is None:
+                continue
+
+            # Primary: AKI → SKI (strongest match).
+            if current_aki is not None:
+                candidate_ski = _get_ski(cert)
+                if candidate_ski is not None:
+                    if current_aki == candidate_ski:
+                        best_block, best_cert, best_idx = block, cert, i
+                        break  # exact cryptographic match
+                    continue  # SKI available but doesn't match — skip
+
+            # Fallback: Issuer name → Subject name.
+            if cert.subject == current.issuer:
+                best_block, best_cert, best_idx = block, cert, i
+                # Don't break — keep looking for an AKI/SKI match.
+
+        if best_block is None or best_cert is None or best_idx is None:
+            break
+
+        chain.append(best_block)
+        used.add(best_idx)
+        current = best_cert
+
+        # Self-signed → root CA reached.
+        if best_cert.issuer == best_cert.subject:
+            break
+
+    if chain:
+        logger.info(
+            "Built certificate chain from downloaded blocks: "
+            "%d CA certificate(s) (leaf excluded)", len(chain),
+        )
+    return chain
+
+
 def _resolve_issuer_chain(pem_block: str) -> "list[str]":
     """Follow AIA CA Issuers URLs to discover parent certificates.
 
@@ -219,6 +321,32 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
             issuer_cn = iss_cn_attrs[0].value if iss_cn_attrs else "(no CN)"
         except Exception:
             issuer_cn = "(unknown)"
+            iss_obj = None
+
+        # Verify the AIA-discovered certificate is the actual issuer by
+        # comparing Authority Key Identifier (child) → Subject Key
+        # Identifier (parent).  Let's Encrypt staging AIA URLs can
+        # serve a certificate from a different chain path (e.g. a
+        # cross-signed or re-keyed root) that does not match the
+        # intermediates in the downloaded chain.
+        if iss_obj is not None:
+            current_aki = _get_aki(cert_obj)
+            issuer_ski = _get_ski(iss_obj)
+            if current_aki and issuer_ski and current_aki != issuer_ski:
+                logger.warning(
+                    "AIA chain resolution: certificate fetched from %s "
+                    "(Subject: '%s', SKI: %s) does not match the "
+                    "Authority Key Identifier (%s) of '%s'. The AIA URL "
+                    "may be serving a stale or incorrect certificate. "
+                    "Stopping chain resolution; the correct issuer CA "
+                    "may need to be imported into ISE manually.",
+                    issuer_url, issuer_cn,
+                    issuer_ski.hex(),
+                    current_aki.hex(),
+                    current_cn,
+                )
+                break
+
         logger.info(
             "AIA chain resolution: discovered issuer '%s' for '%s'",
             issuer_cn, current_cn,
@@ -470,8 +598,20 @@ class ISEClient:
         the downloaded chain but typically omit the root CA.  ISE
         requires the issuer of every imported certificate to already be
         present in its trusted store, so we resolve the full chain up to
-        the root via AIA (Authority Information Access) extensions and
-        import certificates from root down.
+        the root and import certificates from root down.
+
+        The chain is built by walking from the leaf upward through the
+        **downloaded** certificates, matching each certificate's
+        Authority Key Identifier to the next certificate's Subject Key
+        Identifier.  This ensures the *actual* trust path from the ACME
+        response is used, rather than an alternate path that AIA
+        extensions may resolve to (a known issue with Let's Encrypt
+        staging certificates whose AIA URLs can serve certificates from
+        a different chain).
+
+        AIA is only used as a last resort to discover the root CA when
+        it is not included in the downloaded chain, and AIA-discovered
+        certificates are verified against AKI/SKI before being accepted.
 
         If ISE already has a certificate, the call returns HTTP 409
         (conflict) — we silently ignore that.
@@ -481,14 +621,29 @@ class ISEClient:
             # No intermediates to upload.
             return
 
-        intermediates = blocks[1:]  # everything after the leaf
+        # Build the actual trust path from the downloaded certificates
+        # by following AKI → SKI / Issuer → Subject from the leaf.
+        intermediates = _build_chain_from_downloaded(blocks)
 
-        # Follow AIA CA Issuers on the topmost intermediate to discover
-        # any parent certificates (including the root CA) that are not
-        # in the ACME chain but required by ISE's trust validation.
-        extra = _resolve_issuer_chain(intermediates[-1])
-        if extra:
-            intermediates.extend(extra)
+        if not intermediates:
+            # Fallback: use the positional order from the ACME response.
+            intermediates = blocks[1:]
+
+        # If the topmost certificate in the chain is not self-signed
+        # (i.e. the root CA was not included in the download), try to
+        # discover the root via AIA.  The AIA resolver now verifies
+        # AKI/SKI to avoid importing a certificate from a different
+        # chain path.
+        try:
+            top_cert = x509.load_pem_x509_certificate(
+                (intermediates[-1].strip() + "\n").encode("utf-8")
+            )
+            if top_cert.issuer != top_cert.subject:
+                extra = _resolve_issuer_chain(intermediates[-1])
+                if extra:
+                    intermediates.extend(extra)
+        except Exception:
+            pass
 
         # Import from root down so that each certificate's issuer is
         # already trusted by ISE when we upload the next one.
