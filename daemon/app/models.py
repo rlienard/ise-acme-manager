@@ -435,6 +435,28 @@ class CertificateRequestPayload(BaseModel):
     node_ids: List[int] = Field(..., description="ISE nodes to push the cert to")
 
 
+class CertificateIsePushPayload(BaseModel):
+    """
+    Payload for the /push-to-ise SSE endpoint.  Carries the already-obtained
+    cert+key and the ISE targeting parameters so the ISE import can be
+    triggered independently of the ACME issuance step.
+    """
+    cert_pem: str
+    key_pem: str
+    common_name: str
+    node_ids: List[int]
+    portal_group_tag: str
+    certificate_mode: str = "shared"
+    usage: str = "Portal"
+
+
+class CertificateDownloadBundlePayload(BaseModel):
+    """Payload for the /download-bundle endpoint."""
+    cert_pem: str
+    key_pem: str
+    common_name: str
+
+
 class ManagedCertificateResponse(BaseModel):
     id: int
     common_name: str

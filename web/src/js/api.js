@@ -147,6 +147,7 @@ const api = {
             }
             if (eventType === 'log' && onLog) onLog(data);
             else if (eventType === 'complete' && onComplete) onComplete(data);
+            else if (eventType === 'cert_obtained' && handlers.onCertObtained) handlers.onCertObtained(data);
         };
 
         try {
@@ -166,6 +167,105 @@ const api = {
             if (onError) onError(err);
             throw err;
         }
+    },
+
+    /**
+     * Stream ISE import progress after a certificate has been obtained via
+     * ACME.  Calls onLog for each progress event and onComplete when done.
+     */
+    async pushCertToIseStream(payload, handlers = {}) {
+        const { onLog, onComplete, onError } = handlers;
+        let response;
+        try {
+            response = await fetch(`${API_BASE}/api/v1/certificates/push-to-ise`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream',
+                },
+                body: JSON.stringify(payload),
+            });
+        } catch (err) {
+            if (onError) onError(err);
+            throw err;
+        }
+
+        if (!response.ok) {
+            let detail = `HTTP ${response.status}`;
+            try {
+                const body = await response.json();
+                detail = body.detail || detail;
+            } catch (_) { /* ignore */ }
+            const err = new Error(detail);
+            if (onError) onError(err);
+            throw err;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        const processFrame = (frame) => {
+            let eventType = 'message';
+            let dataLines = [];
+            frame.split('\n').forEach(line => {
+                if (line.startsWith('event:')) {
+                    eventType = line.slice(6).trim();
+                } else if (line.startsWith('data:')) {
+                    dataLines.push(line.slice(5).trim());
+                }
+            });
+            if (!dataLines.length) return;
+            let data;
+            try {
+                data = JSON.parse(dataLines.join('\n'));
+            } catch (e) {
+                console.warn('Malformed SSE frame:', dataLines.join('\n'));
+                return;
+            }
+            if (eventType === 'log' && onLog) onLog(data);
+            else if (eventType === 'complete' && onComplete) onComplete(data);
+        };
+
+        try {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                    const frame = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+                    if (frame.trim()) processFrame(frame);
+                }
+            }
+            if (buffer.trim()) processFrame(buffer);
+        } catch (err) {
+            if (onError) onError(err);
+            throw err;
+        }
+    },
+
+    /**
+     * Download a ZIP bundle containing the certificate (PEM) and private key.
+     * Triggers a browser file-save dialog.
+     */
+    async downloadCertBundle(certPem, keyPem, commonName) {
+        const response = await fetch(`${API_BASE}/api/v1/certificates/download-bundle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cert_pem: certPem, key_pem: keyPem, common_name: commonName }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${commonName}-bundle.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     },
 
     // ACME Providers

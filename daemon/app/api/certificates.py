@@ -2,14 +2,17 @@
 Managed Certificates API — CRUD for multi-certificate management.
 """
 
+import io
 import json
 import logging
 import queue
+import re as _re
 import threading
+import zipfile
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response as FastAPIResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -22,6 +25,8 @@ from ..models import (
     ManagedCertificateUpdate,
     ManagedCertificateResponse,
     CertificateRequestPayload,
+    CertificateIsePushPayload,
+    CertificateDownloadBundlePayload,
 )
 from ..services.cert_request import CertificateRequestRunner, CertificateRequestError
 
@@ -153,17 +158,55 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _make_sse_stream(events: "queue.Queue", stop_events: "tuple[str, ...]" = ("complete",)):
+    """Return a generator that yields SSE frames from a queue until a stop event."""
+    def stream():
+        yield _sse("log", {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "phase": "connect",
+            "level": "info",
+            "message": "Connected to certificate request stream",
+            "data": {},
+        })
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield _sse(item["event"], item["data"])
+            if item["event"] in stop_events:
+                break
+    return stream()
+
+
+def _sse_response(events: "queue.Queue", stop_events: "tuple[str, ...]" = ("complete",)):
+    """Wrap _make_sse_stream in a StreamingResponse."""
+    return StreamingResponse(
+        _make_sse_stream(events, stop_events),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/request")
 def request_certificate_stream(payload: CertificateRequestPayload):
     """
-    Request a new certificate from the configured ACME provider and push it
-    to the selected ISE nodes, streaming progress events back over
-    Server-Sent Events so the dashboard overlay can show a live action log.
+    Request a new certificate from the configured ACME provider.
 
-    This endpoint does NOT create a managed-certificate row — it just runs
-    the full request-and-install flow once against whatever payload the UI
-    supplies. Use ``POST /api/v1/certificates`` if you also want recurring
-    auto-renewal for the new certificate.
+    For **Let's Encrypt** providers the endpoint only runs the ACME
+    issuance phase (ACME order → DNS-01 challenge → cert download) and
+    then emits a ``cert_obtained`` SSE event carrying the cert+key PEM so
+    the UI can offer the operator a choice: download a local bundle or
+    push directly to ISE.
+
+    For **DigiCert / ISE-managed ACME** providers the full
+    request-and-install flow runs automatically as before, ending with a
+    ``complete`` event.
+
+    This endpoint does NOT create a managed-certificate row.
     """
     events: queue.Queue = queue.Queue()
 
@@ -181,12 +224,43 @@ def request_certificate_stream(payload: CertificateRequestPayload):
     def worker():
         db = SessionLocal()
         try:
+            # Detect provider type so we can choose the split vs full flow.
+            provider = (
+                db.query(ACMEProvider)
+                .filter(ACMEProvider.id == payload.acme_provider_id)
+                .first()
+            )
             runner = CertificateRequestRunner(db, payload, emit)
-            runner.run()
-            events.put({
-                "event": "complete",
-                "data": {"success": True, "message": "Certificate request completed"},
-            })
+
+            if provider and provider.provider_type == "letsencrypt":
+                # ── Split flow: ACME only ──────────────────────────────
+                cert_pem, key_pem = runner.run_acme_phase()
+                events.put({
+                    "event": "cert_obtained",
+                    "data": {
+                        "cert_pem": cert_pem,
+                        "key_pem": key_pem,
+                        "common_name": payload.common_name,
+                        "node_ids": payload.node_ids,
+                        "portal_group_tag": payload.portal_group_tag,
+                        "certificate_mode": (
+                            payload.certificate_mode.value
+                            if hasattr(payload.certificate_mode, "value")
+                            else str(payload.certificate_mode)
+                        ),
+                        "usage": payload.usage,
+                    },
+                })
+            else:
+                # ── Legacy full flow (DigiCert / ISE-managed ACME) ─────
+                runner.run()
+                events.put({
+                    "event": "complete",
+                    "data": {
+                        "success": True,
+                        "message": "Certificate request completed",
+                    },
+                })
         except CertificateRequestError as e:
             logger.warning(f"Certificate request failed: {e}")
             events.put({
@@ -204,31 +278,95 @@ def request_certificate_stream(payload: CertificateRequestPayload):
             events.put(None)  # sentinel
 
     threading.Thread(target=worker, daemon=True).start()
+    # cert_obtained is a terminal event for this stream (same as complete).
+    return _sse_response(events, stop_events=("complete", "cert_obtained"))
 
-    def stream():
-        # Kick the client with an initial ack so it can render the overlay
-        # even if the first real event takes a few seconds to arrive.
-        yield _sse("log", {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "phase": "connect",
-            "level": "info",
-            "message": "Connected to certificate request stream",
-            "data": {},
+
+@router.post("/push-to-ise")
+def push_certificate_to_ise(payload: CertificateIsePushPayload):
+    """
+    Import an already-obtained certificate into the target ISE nodes.
+
+    Receives the cert+key PEM (obtained from a prior ``/request`` call
+    that emitted ``cert_obtained``) together with the ISE targeting
+    parameters and streams live progress events until the import and
+    portal bind are complete on all nodes.
+    """
+    events: queue.Queue = queue.Queue()
+
+    def emit(phase: str, level: str, payload_data: dict):
+        events.put({
+            "event": "log",
+            "data": {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "phase": phase,
+                "level": level,
+                **payload_data,
+            },
         })
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield _sse(item["event"], item["data"])
-            if item["event"] == "complete":
-                break
 
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
+    def worker():
+        db = SessionLocal()
+        try:
+            # We pass None for the CertificateRequestPayload because
+            # run_ise_push() receives all necessary data as explicit args
+            # and never reads self.payload.
+            runner = CertificateRequestRunner(db, None, emit)
+            runner.run_ise_push(
+                cert_pem=payload.cert_pem,
+                key_pem=payload.key_pem,
+                common_name=payload.common_name,
+                node_ids=payload.node_ids,
+                portal_group_tag=payload.portal_group_tag,
+                certificate_mode=payload.certificate_mode,
+            )
+            events.put({
+                "event": "complete",
+                "data": {
+                    "success": True,
+                    "message": "Certificate pushed to ISE successfully",
+                },
+            })
+        except CertificateRequestError as e:
+            logger.warning(f"ISE push failed: {e}")
+            events.put({
+                "event": "complete",
+                "data": {"success": False, "message": str(e)},
+            })
+        except Exception as e:
+            logger.exception("ISE push crashed")
+            events.put({
+                "event": "complete",
+                "data": {"success": False, "message": f"Unexpected error: {e}"},
+            })
+        finally:
+            db.close()
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return _sse_response(events)
+
+
+@router.post("/download-bundle")
+def download_certificate_bundle(payload: CertificateDownloadBundlePayload):
+    """
+    Return a ZIP archive containing the certificate (PEM) and private key.
+
+    The archive contains two files: ``certificate.pem`` (the full chain
+    returned by the ACME CA) and ``private_key.pem`` (the unencrypted
+    PKCS8 private key).  The download filename is derived from the
+    Common Name.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("certificate.pem", payload.cert_pem)
+        zf.writestr("private_key.pem", payload.key_pem)
+
+    safe_cn = _re.sub(r"[^\w\-.]", "_", payload.common_name)
+    return FastAPIResponse(
+        content=buf.getvalue(),
+        media_type="application/zip",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # disable nginx proxy buffering
+            "Content-Disposition": f'attachment; filename="{safe_cn}-bundle.zip"',
         },
     )
