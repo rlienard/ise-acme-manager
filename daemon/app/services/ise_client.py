@@ -3,7 +3,6 @@ Cisco ISE API Client — handles all ISE interactions.
 """
 
 import logging
-import re
 import secrets
 import string
 
@@ -285,20 +284,12 @@ class ISEClient:
                 # Key is already encrypted; use caller-supplied password as-is.
                 pass
 
-        # ISE expects the leaf certificate in the ``data`` field. ACME
-        # providers (e.g. Let's Encrypt) return a full certificate chain
-        # (leaf + intermediates concatenated). Sending the full chain can
-        # cause ISE to try to verify the private key against the wrong
-        # certificate in the chain and return "Security Check Failed".
-        # Extract only the first PEM block (the leaf) before importing.
+        # ACME providers (e.g. Let's Encrypt) return a full certificate
+        # chain (leaf + intermediates concatenated).  ISE needs the full
+        # chain in the ``data`` field so it can verify the certificate
+        # path back to a trusted root.  Stripping the intermediates
+        # causes HTTP 422 "Failed to verify certificate path".
         raw_cert = cert_data.get("certData") or cert_data.get("data") or ""
-        if raw_cert:
-            m = re.search(
-                r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-                raw_cert,
-                re.DOTALL,
-            )
-            raw_cert = (m.group(0) + "\n") if m else raw_cert
 
         # Note: every ``allow*`` boolean must be supplied explicitly.
         # Newer ISE builds reject the request with HTTP 400
