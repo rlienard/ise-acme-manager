@@ -201,13 +201,28 @@ class CertificateRequestRunner:
                         f"Distributing certificate to secondary node {node.name}",
                         phase="distribute",
                     )
-                    primary_cert = ise.get_certificate_by_cn(cn, primary.name)
-                    if not primary_cert:
-                        raise CertificateRequestError(
-                            f"Primary certificate '{cn}' not found on {primary.name}"
+                    # For LetsEncrypt, we have the original cert + private key
+                    # from the ACME response. Re-use them directly on the
+                    # secondary node — ISE's export API never returns the
+                    # private key, so exporting from primary and re-importing
+                    # would always fail with "Security Check Failed".
+                    if provider.provider_type == "letsencrypt" and cert_info.get("cert_pem"):
+                        ise.import_certificate(
+                            {
+                                "certData": cert_info["cert_pem"],
+                                "privateKeyData": cert_info["key_pem"],
+                            },
+                            node.name,
+                            payload.portal_group_tag,
                         )
-                    cert_data = ise.export_certificate(primary_cert["id"], primary.name)
-                    ise.import_certificate(cert_data, node.name, payload.portal_group_tag)
+                    else:
+                        primary_cert = ise.get_certificate_by_cn(cn, primary.name)
+                        if not primary_cert:
+                            raise CertificateRequestError(
+                                f"Primary certificate '{cn}' not found on {primary.name}"
+                            )
+                        cert_data = ise.export_certificate(primary_cert["id"], primary.name)
+                        ise.import_certificate(cert_data, node.name, payload.portal_group_tag)
                     imported = ise.get_certificate_by_cn(cn, node.name)
                     if imported:
                         ise.bind_certificate_to_portal(
@@ -453,7 +468,7 @@ class CertificateRequestRunner:
                     phase="bind",
                 )
 
-            return {"certificate_id": cert_id}
+            return {"certificate_id": cert_id, "cert_pem": cert_pem, "key_pem": key_pem}
         finally:
             if dns_record_id:
                 try:

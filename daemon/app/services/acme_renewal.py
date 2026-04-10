@@ -488,10 +488,15 @@ class ACMERenewalEngine:
                 except Exception:
                     pass
 
-        # Distribute to secondaries
+        # Distribute to secondaries.  Pass the original cert + key so
+        # _distribute_cert can import them directly instead of trying to
+        # export from ISE (which never includes the private key).
         if results.get(primary_name, {}).get("status") == "renewed":
             for node in secondary_nodes:
-                results[node.name] = self._distribute_cert(ise, config, cn, primary_name, node.name)
+                results[node.name] = self._distribute_cert(
+                    ise, config, cn, primary_name, node.name,
+                    cert_pem=cert_pem, key_pem=key_pem,
+                )
 
         return results
 
@@ -559,15 +564,28 @@ class ACMERenewalEngine:
 
         return results
 
-    def _distribute_cert(self, ise, config, cn, primary_name, target_name):
-        """Export cert from primary and import to target."""
-        try:
-            primary_cert = ise.get_certificate_by_cn(cn, primary_name)
-            if not primary_cert:
-                return {"status": "failed", "error": "Primary cert not found"}
+    def _distribute_cert(self, ise, config, cn, primary_name, target_name,
+                         cert_pem=None, key_pem=None):
+        """Import a certificate onto a secondary ISE node.
 
-            cert_data = ise.export_certificate(primary_cert["id"], primary_name)
-            ise.import_certificate(cert_data, target_name, config.get("portal_group_tag", ""))
+        When ``cert_pem`` and ``key_pem`` are supplied (LetsEncrypt shared
+        mode), they are used directly. This avoids calling the ISE export
+        endpoint, which never includes the private key and would therefore
+        cause the import to fail with "Security Check Failed".
+        """
+        try:
+            if cert_pem and key_pem:
+                ise.import_certificate(
+                    {"certData": cert_pem, "privateKeyData": key_pem},
+                    target_name, config.get("portal_group_tag", ""),
+                )
+            else:
+                primary_cert = ise.get_certificate_by_cn(cn, primary_name)
+                if not primary_cert:
+                    return {"status": "failed", "error": "Primary cert not found"}
+
+                cert_data = ise.export_certificate(primary_cert["id"], primary_name)
+                ise.import_certificate(cert_data, target_name, config.get("portal_group_tag", ""))
 
             imported = ise.get_certificate_by_cn(cn, target_name)
             if imported:

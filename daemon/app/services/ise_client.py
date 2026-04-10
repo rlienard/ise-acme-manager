@@ -3,6 +3,7 @@ Cisco ISE API Client — handles all ISE interactions.
 """
 
 import logging
+import re
 import secrets
 import string
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _encrypt_private_key(private_key_pem: str) -> "tuple[str, str]":
     """
-    Re-serialize a PEM private key as an encrypted PKCS#8 blob.
+    Re-serialize a PEM private key as an encrypted PEM blob.
 
     Cisco ISE's ``POST /api/v1/certs/system-certificate/import`` endpoint
     rejects unencrypted private keys with a generic "Security Check
@@ -25,10 +26,17 @@ def _encrypt_private_key(private_key_pem: str) -> "tuple[str, str]":
     key with a one-shot random passphrase and send the passphrase in
     the ``password`` field of the import payload.
 
+    Uses the traditional OpenSSL PEM encryption format (``Proc-Type:
+    4,ENCRYPTED`` / ``DEK-Info`` headers) rather than PKCS#8
+    EncryptedPrivateKeyInfo. The PKCS#8 format uses PBES2 with
+    PBKDF2-SHA512 + AES-256-CBC, which some ISE versions cannot decrypt
+    due to Java JCE policy restrictions. The traditional OpenSSL format
+    uses a simpler key derivation that all ISE versions support.
+
     Returns ``(encrypted_pem, password)``. If the key is already in
     encrypted form the caller should skip this helper.
     """
-    # 12-character alphanumeric passphrase — ISE rejects passwords that
+    # 16-character alphanumeric passphrase — ISE rejects passwords that
     # are shorter than 8 chars or contain non-alphanumerics.
     alphabet = string.ascii_letters + string.digits
     password = "".join(secrets.choice(alphabet) for _ in range(16))
@@ -40,7 +48,7 @@ def _encrypt_private_key(private_key_pem: str) -> "tuple[str, str]":
     )
     encrypted_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.BestAvailableEncryption(
             password.encode("utf-8")
         ),
@@ -256,12 +264,41 @@ class ISEClient:
         # ISE's import endpoint rejects unencrypted private keys with a
         # generic "Security Check Failed" error. LetsEncrypt (and any
         # freshly generated key from our ACME client) returns the key in
-        # plain PKCS#8, so we wrap it in encrypted PKCS#8 here and send
-        # the generated passphrase in the ``password`` field.
+        # plain PKCS#8 / unencrypted form, so we wrap it in an encrypted
+        # blob here and send the generated passphrase in the ``password``
+        # field. We detect whether encryption is needed by attempting to
+        # load the key without a password — unencrypted keys load cleanly,
+        # while encrypted ones raise TypeError regardless of format (PKCS#8
+        # EncryptedPrivateKeyInfo or traditional OpenSSL Proc-Type header).
         private_key_pem = cert_data.get("privateKeyData")
         password = cert_data.get("password") or ""
-        if private_key_pem and "ENCRYPTED" not in private_key_pem.split("\n", 1)[0]:
-            private_key_pem, password = _encrypt_private_key(private_key_pem)
+        if private_key_pem:
+            try:
+                serialization.load_pem_private_key(
+                    private_key_pem.encode("utf-8") if isinstance(private_key_pem, str)
+                    else private_key_pem,
+                    password=None,
+                )
+                # Loaded without a password → key is unencrypted → encrypt it.
+                private_key_pem, password = _encrypt_private_key(private_key_pem)
+            except TypeError:
+                # Key is already encrypted; use caller-supplied password as-is.
+                pass
+
+        # ISE expects the leaf certificate in the ``data`` field. ACME
+        # providers (e.g. Let's Encrypt) return a full certificate chain
+        # (leaf + intermediates concatenated). Sending the full chain can
+        # cause ISE to try to verify the private key against the wrong
+        # certificate in the chain and return "Security Check Failed".
+        # Extract only the first PEM block (the leaf) before importing.
+        raw_cert = cert_data.get("certData") or cert_data.get("data") or ""
+        if raw_cert:
+            m = re.search(
+                r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                raw_cert,
+                re.DOTALL,
+            )
+            raw_cert = (m.group(0) + "\n") if m else raw_cert
 
         # Note: every ``allow*`` boolean must be supplied explicitly.
         # Newer ISE builds reject the request with HTTP 400
@@ -269,7 +306,7 @@ class ISEClient:
         # these fields are omitted.
         payload = {
             "name": node_name,
-            "data": cert_data.get("certData") or cert_data.get("data"),
+            "data": raw_cert or None,
             "privateKeyData": private_key_pem,
             "password": password,
             "portal": True,
