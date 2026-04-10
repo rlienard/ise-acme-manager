@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import string
+import time
 
 import requests
 import urllib3
@@ -152,16 +153,40 @@ def _resolve_issuer_chain(pem_block: str) -> "list[str]":
             "AIA chain resolution: fetching issuer of '%s' from %s",
             current_cn, issuer_url,
         )
-        try:
-            resp = requests.get(issuer_url, timeout=10)
-            resp.raise_for_status()
-        except Exception as exc:
-            logger.warning(
-                "AIA chain resolution: failed to fetch issuer certificate "
-                "for '%s' from %s: %s. The root CA may need to be imported "
-                "into ISE manually.",
-                current_cn, issuer_url, exc,
-            )
+        resp = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.get(issuer_url, timeout=20)
+                resp.raise_for_status()
+                break  # success
+            except Exception as exc:
+                if attempt < max_attempts:
+                    wait = 2 ** (attempt - 1)
+                    logger.info(
+                        "AIA chain resolution: attempt %d/%d failed for %s: "
+                        "%s — retrying in %ds",
+                        attempt, max_attempts, issuer_url, exc, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    # Extract issuer CN for a helpful message.
+                    try:
+                        iss_cn_hint = cert_obj.issuer.get_attributes_for_oid(
+                            x509.oid.NameOID.COMMON_NAME
+                        )
+                        issuer_hint = iss_cn_hint[0].value if iss_cn_hint else str(cert_obj.issuer)
+                    except Exception:
+                        issuer_hint = "(unknown)"
+                    logger.warning(
+                        "AIA chain resolution: all %d attempts failed to "
+                        "fetch issuer certificate for '%s' from %s: %s. "
+                        "The issuer CA '%s' must be imported into ISE's "
+                        "trusted certificate store manually.",
+                        max_attempts, current_cn, issuer_url, exc,
+                        issuer_hint,
+                    )
+        if resp is None:
             break
 
         # The response is typically DER-encoded; convert to PEM.
@@ -551,15 +576,24 @@ class ISEClient:
                             detail = exc.response.text.strip()
                         except Exception:
                             detail = ""
+                    # Extract issuer CN for a more actionable error.
+                    try:
+                        iss_attrs = cert_obj.issuer.get_attributes_for_oid(
+                            x509.oid.NameOID.COMMON_NAME
+                        )
+                        issuer_cn = iss_attrs[0].value if iss_attrs else str(cert_obj.issuer)
+                    except Exception:
+                        issuer_cn = "(unknown)"
                     logger.error(
-                        "Failed to import CA [%d/%d] '%s' (HTTP %s): %s",
-                        idx + 1, total, friendly, status, detail or "(empty)",
+                        "Failed to import CA [%d/%d] '%s' (HTTP %s): %s. "
+                        "Issuer (parent CA): '%s'",
+                        idx + 1, total, friendly, status,
+                        detail or "(empty)", issuer_cn,
                     )
                     hint = (
-                        ". Verify that the issuer (parent CA) of this "
-                        "certificate is already present in ISE's trusted "
-                        "certificate store. If the root CA is missing, "
-                        "import it manually before retrying."
+                        f". Verify that the issuer CA '{issuer_cn}' is "
+                        "already present in ISE's trusted certificate store. "
+                        "If it is missing, import it manually before retrying."
                     )
                     raise RuntimeError(
                         f"Failed to import CA '{friendly}' "
