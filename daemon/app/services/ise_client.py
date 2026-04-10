@@ -3,12 +3,14 @@ Cisco ISE API Client — handles all ISE interactions.
 """
 
 import logging
+import re
 import secrets
 import string
 
 import requests
 import urllib3
 from cryptography.hazmat.primitives import serialization
+from cryptography import x509
 from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -53,6 +55,19 @@ def _encrypt_private_key(private_key_pem: str) -> "tuple[str, str]":
         ),
     ).decode("utf-8")
     return encrypted_pem, password
+
+
+def _split_pem_chain(pem_chain: str) -> "list[str]":
+    """Split a concatenated PEM chain into individual PEM blocks.
+
+    Returns a list where the first element is the leaf certificate and
+    the remaining elements are intermediate/root CA certificates.
+    """
+    return re.findall(
+        r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+        pem_chain,
+        re.DOTALL,
+    )
 
 
 class ISEClient:
@@ -248,6 +263,71 @@ class ISEClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"POST {post_url} failed: {e}") from e
 
+    def _ensure_intermediates_trusted(self, pem_chain: str) -> None:
+        """Upload intermediate CA certificates to ISE's trusted store.
+
+        ISE must already trust every certificate in the chain above the
+        leaf in order for ``system-certificate/import`` to succeed.
+        Let's Encrypt (and most ACME CAs) include the intermediates in
+        the downloaded chain, but ISE's trusted store may not contain
+        them.
+
+        Each intermediate is submitted individually.  If ISE already has
+        the certificate, the call returns HTTP 409 (conflict) — we
+        silently ignore that.
+        """
+        blocks = _split_pem_chain(pem_chain)
+        if len(blocks) <= 1:
+            # No intermediates to upload.
+            return
+
+        intermediates = blocks[1:]  # everything after the leaf
+        url = f"{self.base_url}/certs/trusted-certificate/import"
+
+        for idx, pem_block in enumerate(intermediates):
+            # Derive a human-readable name from the certificate subject.
+            try:
+                cert_obj = x509.load_pem_x509_certificate(
+                    (pem_block + "\n").encode("utf-8")
+                )
+                cn_attrs = cert_obj.subject.get_attributes_for_oid(
+                    x509.oid.NameOID.COMMON_NAME
+                )
+                friendly = cn_attrs[0].value if cn_attrs else f"ACME-intermediate-{idx}"
+            except Exception:
+                friendly = f"ACME-intermediate-{idx}"
+
+            payload = {
+                "data": pem_block + "\n",
+                "name": friendly,
+                "description": "Imported automatically by ACME Manager",
+                "allowBasicConstraintCAFalse": True,
+                "allowOutOfDateCert": False,
+                "allowSHA1Certificates": False,
+                "trustForCertificateBasedAdminAuth": False,
+                "trustForCiscoServicesAuth": False,
+                "trustForClientAuth": False,
+                "trustForIseAuth": False,
+                "validateCertificateExtensions": False,
+            }
+            try:
+                resp = self.session.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                logger.info("Imported intermediate CA '%s' into ISE trusted store", friendly)
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "?"
+                if status == 409:
+                    # Certificate already exists in ISE's trusted store.
+                    logger.debug("Intermediate CA '%s' already trusted by ISE", friendly)
+                else:
+                    logger.warning(
+                        "Failed to import intermediate CA '%s' (HTTP %s) — "
+                        "system-certificate import may still succeed if ISE "
+                        "already trusts the chain",
+                        friendly,
+                        status,
+                    )
+
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
         """
         Import a certificate to an ISE node.
@@ -285,11 +365,19 @@ class ISEClient:
                 pass
 
         # ACME providers (e.g. Let's Encrypt) return a full certificate
-        # chain (leaf + intermediates concatenated).  ISE needs the full
-        # chain in the ``data`` field so it can verify the certificate
-        # path back to a trusted root.  Stripping the intermediates
-        # causes HTTP 422 "Failed to verify certificate path".
+        # chain (leaf + intermediates concatenated).  ISE's system-cert
+        # import endpoint needs *only the leaf* in the ``data`` field —
+        # sending the full chain causes "Security Check Failed" because
+        # ISE tries to match the private key against the wrong cert.
+        # However ISE must also be able to verify the full chain, which
+        # requires the intermediates to be present in its trusted store.
+        # We therefore upload intermediates first, then import the leaf.
         raw_cert = cert_data.get("certData") or cert_data.get("data") or ""
+        if raw_cert:
+            self._ensure_intermediates_trusted(raw_cert)
+            blocks = _split_pem_chain(raw_cert)
+            if blocks:
+                raw_cert = blocks[0] + "\n"  # leaf only
 
         # Note: every ``allow*`` boolean must be supplied explicitly.
         # Newer ISE builds reject the request with HTTP 400
