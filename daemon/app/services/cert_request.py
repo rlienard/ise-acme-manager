@@ -148,28 +148,7 @@ class CertificateRequestRunner:
         ise = ISEClient(config)
 
         # Build DNS client linked to the ACME provider, with legacy fallback
-        dns = None
-        if provider.dns_provider is not None:
-            try:
-                dns = build_dns_client(provider.dns_provider)
-                self.info(
-                    f"Using DNS provider '{provider.dns_provider.name}' "
-                    f"({provider.dns_provider.provider_type})",
-                    phase="dns_provider",
-                )
-            except Exception as e:
-                self.warning(
-                    f"Failed to build DNS client from provider "
-                    f"'{provider.dns_provider.name}': {e}. Falling back to legacy config."
-                )
-        if dns is None:
-            try:
-                dns = get_dns_provider(config)
-                self.info("Using legacy DNS provider from global settings", phase="dns_provider")
-            except Exception as e:
-                raise CertificateRequestError(
-                    f"No DNS provider available for DNS-01 challenge: {e}"
-                )
+        dns = self._build_dns_client(provider, config)
 
         # Dispatch to the right engine. LetsEncrypt is driven externally with
         # our own ACMEv2Client; DigiCert is driven by ISE's built-in ACME
@@ -244,6 +223,331 @@ class CertificateRequestRunner:
             phase="done",
             data={"common_name": cn, "certificate_id": cert_info.get("certificate_id")},
         )
+
+    # ── ACME-phase-only entry point (LetsEncrypt split flow) ────
+
+    def run_acme_phase(self) -> "tuple[str, str]":
+        """Run only the ACME certificate issuance phase for Let's Encrypt.
+
+        This is the first half of the split flow triggered by the
+        Settings → Request New Certificate overlay.  It performs the
+        ACME order + DNS-01 challenge + cert download without touching
+        ISE, then returns (cert_pem, key_pem) so the API worker can
+        emit a ``cert_obtained`` SSE event and let the operator decide
+        whether to push to ISE or just download a local bundle.
+
+        Raises ``CertificateRequestError`` if the provider is not
+        Let's Encrypt (only that provider supports this split mode).
+        """
+        payload = self.payload
+        cn = payload.common_name
+        sans = payload.san_names or []
+        mode = (
+            payload.certificate_mode.value
+            if hasattr(payload.certificate_mode, "value")
+            else str(payload.certificate_mode)
+        )
+
+        self.info(
+            f"Starting certificate request for {cn}",
+            phase="start",
+            data={
+                "common_name": cn,
+                "san_names": sans,
+                "key_type": payload.key_type,
+                "usage": payload.usage,
+                "certificate_mode": mode,
+                "portal_group_tag": payload.portal_group_tag,
+            },
+        )
+
+        provider = self._resolve_provider()
+        if provider.provider_type != "letsencrypt":
+            raise CertificateRequestError(
+                "Download-phase-only mode is only supported for Let's Encrypt providers"
+            )
+        self.info(
+            f"Using ACME provider '{provider.name}' ({provider.provider_type})",
+            phase="provider",
+            data={"provider_id": provider.id, "provider_type": provider.provider_type},
+        )
+
+        nodes = self._resolve_nodes()
+        primary = self._pick_primary(nodes)
+        secondaries = [n for n in nodes if n.id != primary.id]
+        self.info(
+            f"Target nodes: primary={primary.name}"
+            + (f", secondaries={[n.name for n in secondaries]}" if secondaries else ""),
+            phase="nodes",
+        )
+
+        config = ConfigManager.get_flat(self.db)
+        dns = self._build_dns_client(provider, config)
+
+        # Run the ACME portion of _run_letsencrypt (stops before ISE import).
+        cert_pem, key_pem = self._run_letsencrypt_acme_only(dns, provider, primary)
+        return cert_pem, key_pem
+
+    # ── ISE-push-phase entry point (LetsEncrypt split flow) ─────
+
+    def run_ise_push(
+        self,
+        cert_pem: str,
+        key_pem: str,
+        common_name: str,
+        node_ids: "list[int]",
+        portal_group_tag: str,
+        certificate_mode: str = "shared",
+    ) -> None:
+        """Import an already-obtained certificate into all target ISE nodes.
+
+        This is the second half of the split flow.  It receives the
+        cert+key obtained by ``run_acme_phase`` (or passed back from the
+        browser after a ``cert_obtained`` SSE event) and handles ISE
+        import, portal binding, and secondary-node distribution.
+        """
+        config = ConfigManager.get_flat(self.db)
+        ise = ISEClient(config)
+        nodes = (
+            self.db.query(ISENode)
+            .filter(ISENode.id.in_(node_ids))
+            .all()
+        )
+        if not nodes:
+            raise CertificateRequestError("No target ISE nodes found for push")
+        primary = self._pick_primary(nodes)
+        secondaries = [n for n in nodes if n.id != primary.id]
+
+        # ── Primary node ──
+        self.info(
+            f"Importing certificate into ISE node {primary.name}",
+            phase="import",
+        )
+        ise.import_certificate(
+            {"certData": cert_pem, "privateKeyData": key_pem},
+            primary.name,
+            portal_group_tag,
+        )
+        self.success(f"Certificate imported on {primary.name}", phase="import")
+
+        imported = ise.get_certificate_by_cn(common_name, primary.name)
+        cert_id = imported.get("id") if imported else None
+        if cert_id:
+            self.info(
+                f"Binding certificate to portal group '{portal_group_tag}'",
+                phase="bind",
+            )
+            ise.bind_certificate_to_portal(cert_id, portal_group_tag, primary.name)
+            self.success("Certificate bound to portal", phase="bind")
+        else:
+            self.warning(
+                "Imported certificate not found after import — skipped portal bind",
+                phase="bind",
+            )
+
+        # ── Secondary nodes ──
+        for node in secondaries:
+            try:
+                self.info(
+                    f"Distributing certificate to secondary node {node.name}",
+                    phase="distribute",
+                )
+                ise.import_certificate(
+                    {"certData": cert_pem, "privateKeyData": key_pem},
+                    node.name,
+                    portal_group_tag,
+                )
+                dist_imported = ise.get_certificate_by_cn(common_name, node.name)
+                if dist_imported:
+                    ise.bind_certificate_to_portal(
+                        dist_imported["id"], portal_group_tag, node.name
+                    )
+                self.success(
+                    f"Certificate distributed to {node.name}",
+                    phase="distribute",
+                    data={"node": node.name},
+                )
+            except Exception as e:
+                self.error(
+                    f"Failed to distribute certificate to {node.name}: {e}",
+                    phase="distribute",
+                )
+
+        self.success(
+            f"Certificate pushed to ISE successfully",
+            phase="done",
+            data={"common_name": common_name, "certificate_id": cert_id},
+        )
+
+    # ── DNS client builder (shared by run() and run_acme_phase()) ──
+
+    def _build_dns_client(self, provider: ACMEProvider, config: dict):
+        """Build a DNS client from the provider or legacy global settings."""
+        dns = None
+        if provider.dns_provider is not None:
+            try:
+                dns = build_dns_client(provider.dns_provider)
+                self.info(
+                    f"Using DNS provider '{provider.dns_provider.name}' "
+                    f"({provider.dns_provider.provider_type})",
+                    phase="dns_provider",
+                )
+            except Exception as e:
+                self.warning(
+                    f"Failed to build DNS client from provider "
+                    f"'{provider.dns_provider.name}': {e}. Falling back to legacy config."
+                )
+        if dns is None:
+            try:
+                dns = get_dns_provider(config)
+                self.info(
+                    "Using legacy DNS provider from global settings",
+                    phase="dns_provider",
+                )
+            except Exception as e:
+                raise CertificateRequestError(
+                    f"No DNS provider available for DNS-01 challenge: {e}"
+                )
+        return dns
+
+    # ── ACME-only inner helper (no ISE) ─────────────────────────
+
+    def _run_letsencrypt_acme_only(
+        self, dns, provider: ACMEProvider, node: ISENode
+    ) -> "tuple[str, str]":
+        """Run the ACME issuance flow and return (cert_pem, key_pem).
+
+        Mirrors the ACME portion of ``_run_letsencrypt`` but stops before
+        the ISE import step.  Called by ``run_acme_phase``.
+        """
+        payload = self.payload
+        cn = payload.common_name
+        san_names = payload.san_names or []
+        all_domains = [cn] + [s for s in san_names if s != cn]
+
+        if "acme-staging" in (provider.directory_url or "").lower():
+            self.info(
+                "This ACME provider uses a Let's Encrypt staging directory URL. "
+                "Staging certificates are intended for testing only.",
+                phase="acme_directory",
+            )
+
+        self.info(
+            f"Connecting to ACME directory {provider.directory_url}",
+            phase="acme_directory",
+        )
+        client = ACMEv2Client(
+            directory_url=provider.directory_url,
+            account_email=provider.account_email or "",
+            account_key_pem=provider.account_key or None,
+        )
+
+        self.info("Registering / reusing ACME account", phase="acme_account")
+        try:
+            client.register_account()
+        except Exception as e:
+            raise CertificateRequestError(f"ACME account registration failed: {e}")
+        if not provider.account_key:
+            provider.account_key = client.get_account_key_pem()
+            self.db.commit()
+            self.info(
+                "Persisted freshly generated ACME account key on provider",
+                phase="acme_account",
+            )
+
+        self.info(
+            f"Creating ACME order for: {', '.join(all_domains)}",
+            phase="acme_order",
+        )
+        try:
+            order = client.create_order(all_domains)
+        except Exception as e:
+            raise CertificateRequestError(f"ACME order creation failed: {e}")
+        self.success("ACME order created", phase="acme_order")
+
+        dns_record_id = None
+        try:
+            for authz_url in order["authorizations"]:
+                authz = client.get_authorization(authz_url)
+                domain = authz["identifier"]["value"]
+
+                self.info(
+                    f"Processing DNS-01 challenge for {domain}",
+                    phase="challenge",
+                )
+                challenge = client.get_dns01_challenge(authz)
+                record_name = client.get_dns_record_name(domain)
+                record_value = client.get_dns_txt_value(challenge["token"])
+                self.success(
+                    f"Challenge received: {record_name}",
+                    phase="challenge",
+                    data={"record_name": record_name, "record_value": record_value},
+                )
+
+                self.info(
+                    f"Creating DNS TXT record {record_name} on the DNS provider",
+                    phase="dns_create",
+                )
+                dns_record_id = dns.create_txt_record(record_name, record_value)
+                self.success(
+                    f"DNS TXT record created (id={dns_record_id})",
+                    phase="dns_create",
+                )
+
+                self.info("Waiting 90s for DNS propagation…", phase="dns_wait")
+                time.sleep(90)
+
+                self.info(
+                    "Notifying ACME server that DNS record is ready",
+                    phase="validate",
+                )
+                client.respond_to_challenge(challenge["url"])
+
+                self.info(
+                    "Polling authorization until it becomes valid",
+                    phase="validate",
+                )
+                client.poll_authorization(authz_url)
+                self.success(f"Authorization valid for {domain}", phase="validate")
+
+                if dns_record_id:
+                    try:
+                        self.info("Cleaning up DNS TXT record", phase="dns_cleanup")
+                        dns.delete_txt_record(dns_record_id)
+                        self.success("DNS TXT record cleaned up", phase="dns_cleanup")
+                    except Exception as e:
+                        self.warning(
+                            f"Failed to delete DNS TXT record: {e}",
+                            phase="dns_cleanup",
+                        )
+                    dns_record_id = None
+
+            self.info(
+                "Finalizing order and downloading the signed certificate",
+                phase="finalize",
+            )
+            cert_pem, key_pem = client.finalize_order(
+                order,
+                cn,
+                san_names,
+                key_type=payload.key_type,
+                subject=payload.subject or {},
+            )
+            self.success("Certificate signed by the ACME CA", phase="finalize")
+            return cert_pem, key_pem
+        finally:
+            if dns_record_id:
+                try:
+                    self.info(
+                        "Cleaning up leftover DNS TXT record", phase="dns_cleanup"
+                    )
+                    dns.delete_txt_record(dns_record_id)
+                    self.success("DNS TXT record cleaned up", phase="dns_cleanup")
+                except Exception as e:
+                    self.warning(
+                        f"Failed to delete DNS TXT record: {e}",
+                        phase="dns_cleanup",
+                    )
 
     # ── DigiCert / ISE-managed ACME flow ────────────────────
 

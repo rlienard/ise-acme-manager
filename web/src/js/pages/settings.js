@@ -2104,6 +2104,7 @@ const Settings = {
             await api.requestCertificateStream(payload, {
                 onLog: (evt) => this._appendCertRequestLog(evt),
                 onComplete: (evt) => this._completeCertRequestLog(evt),
+                onCertObtained: (evt) => this._onCertObtained(evt),
                 onError: (err) => this._completeCertRequestLog({
                     success: false,
                     message: err.message || String(err),
@@ -2138,6 +2139,14 @@ const Settings = {
                     </div>
                     <div class="cert-log-body" id="cert-log-body"></div>
                     <div class="cert-log-footer">
+                        <button class="btn btn-primary btn-sm" id="cert-log-push-ise-btn"
+                                onclick="Settings._onPushToIse()" style="display:none">
+                            <i class="fas fa-upload"></i> Push to Cisco ISE
+                        </button>
+                        <button class="btn btn-outline btn-sm" id="cert-log-download-btn"
+                                onclick="Settings._onDownloadBundle()" style="display:none">
+                            <i class="fas fa-download"></i> Download Bundle
+                        </button>
                         <button class="btn btn-outline btn-sm" id="cert-log-close-btn"
                                 onclick="Settings._closeCertRequestLogOverlay()" disabled>
                             <i class="fas fa-times"></i> Close
@@ -2148,10 +2157,13 @@ const Settings = {
         }
 
         // Reset state for a new run.
+        this._pendingCertData = null;
         const title = document.getElementById('cert-log-title');
         const status = document.getElementById('cert-log-status');
         const body = document.getElementById('cert-log-body');
         const closeBtn = document.getElementById('cert-log-close-btn');
+        const pushBtn = document.getElementById('cert-log-push-ise-btn');
+        const dlBtn = document.getElementById('cert-log-download-btn');
         if (title) title.textContent = `Requesting certificate for ${payload.common_name}`;
         if (status) {
             status.className = 'cert-log-status running';
@@ -2159,6 +2171,8 @@ const Settings = {
         }
         if (body) body.innerHTML = '';
         if (closeBtn) closeBtn.disabled = true;
+        if (pushBtn) { pushBtn.style.display = 'none'; pushBtn.disabled = false; pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE'; }
+        if (dlBtn) dlBtn.style.display = 'none';
         overlay.style.display = 'flex';
     },
 
@@ -2231,6 +2245,93 @@ const Settings = {
             Toast.success('Certificate request completed');
             // Refresh the discovered list so the new cert appears.
             this.fetchISECertificates().catch(() => {});
+        }
+    },
+
+    // ── cert_obtained: show action buttons ──────────────────
+
+    _onCertObtained(evt) {
+        // Store the cert data so the Download / Push buttons can use it.
+        this._pendingCertData = evt;
+
+        const status = document.getElementById('cert-log-status');
+        if (status) {
+            status.className = 'cert-log-status success';
+            status.innerHTML = '<i class="fas fa-check-circle"></i><span>Certificate obtained</span>';
+        }
+
+        const body = document.getElementById('cert-log-body');
+        if (body) {
+            const summary = document.createElement('div');
+            summary.className = 'cert-log-line cert-log-line--success cert-log-summary';
+            summary.innerHTML = `
+                <i class="fas fa-check-circle cert-log-icon"></i>
+                <span class="cert-log-msg"><strong>Certificate obtained from Let&#x27;s Encrypt. Use the buttons below to push to ISE or download a local copy.</strong></span>`;
+            body.appendChild(summary);
+            body.scrollTop = body.scrollHeight;
+        }
+
+        const pushBtn = document.getElementById('cert-log-push-ise-btn');
+        const dlBtn = document.getElementById('cert-log-download-btn');
+        const closeBtn = document.getElementById('cert-log-close-btn');
+        if (pushBtn) pushBtn.style.display = '';
+        if (dlBtn) dlBtn.style.display = '';
+        if (closeBtn) closeBtn.disabled = false;
+    },
+
+    async _onDownloadBundle() {
+        if (!this._pendingCertData) return;
+        const { cert_pem, key_pem, common_name } = this._pendingCertData;
+        try {
+            await api.downloadCertBundle(cert_pem, key_pem, common_name);
+        } catch (e) {
+            Toast.error('Download failed: ' + (e.message || String(e)));
+        }
+    },
+
+    async _onPushToIse() {
+        if (!this._pendingCertData) return;
+        const d = this._pendingCertData;
+
+        const pushBtn = document.getElementById('cert-log-push-ise-btn');
+        if (pushBtn) {
+            pushBtn.disabled = true;
+            pushBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Pushing\u2026';
+        }
+
+        const status = document.getElementById('cert-log-status');
+        if (status) {
+            status.className = 'cert-log-status running';
+            status.innerHTML = '<span class="cert-log-spinner"><i class="fas fa-circle-notch fa-spin"></i></span><span>Pushing to ISE\u2026</span>';
+        }
+
+        try {
+            await api.pushCertToIseStream(
+                {
+                    cert_pem: d.cert_pem,
+                    key_pem: d.key_pem,
+                    common_name: d.common_name,
+                    node_ids: d.node_ids,
+                    portal_group_tag: d.portal_group_tag,
+                    certificate_mode: d.certificate_mode,
+                    usage: d.usage,
+                },
+                {
+                    onLog: (evt) => this._appendCertRequestLog(evt),
+                    onComplete: (evt) => {
+                        if (pushBtn) pushBtn.style.display = 'none';
+                        this._completeCertRequestLog(evt);
+                        if (evt && evt.success) this.fetchISECertificates().catch(() => {});
+                    },
+                    onError: (err) => {
+                        if (pushBtn) { pushBtn.disabled = false; pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE'; }
+                        this._completeCertRequestLog({ success: false, message: err.message || String(err) });
+                    },
+                }
+            );
+        } catch (e) {
+            if (pushBtn) { pushBtn.disabled = false; pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE'; }
+            this._completeCertRequestLog({ success: false, message: String(e) });
         }
     },
 
