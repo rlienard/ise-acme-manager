@@ -540,6 +540,7 @@ class ISEClient:
                             detail = exc.response.text.strip()
                         except Exception:
                             detail = ""
+<<<<<<< claude/fix-letsencrypt-staging-import-2Q8Dw
                     # When ISE returns "Security Check Failed" it usually
                     # means the certificate's issuer is not yet in its trust
                     # store.  Give the operator a hint about the AIA URL so
@@ -550,11 +551,26 @@ class ISEClient:
                         if aia_hint and not extra
                         else ""
                     )
+=======
+                    hint = ""
+                    if "(staging)" in friendly.lower():
+                        hint = (
+                            ". This is a Let's Encrypt STAGING intermediate — "
+                            "staging CA chains are not accepted by ISE. "
+                            "Switch the ACME provider's directory URL to the "
+                            "production endpoint: "
+                            "https://acme-v02.api.letsencrypt.org/directory"
+                        )
+>>>>>>> main
                     raise RuntimeError(
                         f"Failed to import CA certificate '{friendly}' "
                         f"into ISE trusted store (HTTP {status})"
                         + (f": {detail}" if detail else "")
+<<<<<<< claude/fix-letsencrypt-staging-import-2Q8Dw
                         + aia_note
+=======
+                        + hint
+>>>>>>> main
                     ) from exc
 
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:

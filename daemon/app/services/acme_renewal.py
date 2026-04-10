@@ -377,9 +377,18 @@ class ACMERenewalEngine:
 
     def _build_acme_client(self, config, db):
         """Build an ACMEv2Client, persisting the account key on first use."""
+        dir_url = config.get("acme_directory_url") or ""
+        if "acme-staging" in dir_url.lower():
+            logger.warning(
+                "ACME provider is using a Let's Encrypt STAGING directory URL "
+                "(%s). Staging certificates use fake CA chains that cannot be "
+                "imported into Cisco ISE. For production use, switch to "
+                "https://acme-v02.api.letsencrypt.org/directory",
+                dir_url,
+            )
         account_key_pem = config.get("acme_account_key") or None
         client = ACMEv2Client(
-            directory_url=config.get("acme_directory_url"),
+            directory_url=dir_url,
             account_email=config.get("acme_account_email", ""),
             account_key_pem=account_key_pem,
         )
