@@ -348,6 +348,16 @@ class CertificateRequestRunner:
         san_names = payload.san_names or []
         all_domains = [cn] + [s for s in san_names if s != cn]
 
+        if "acme-staging" in (provider.directory_url or "").lower():
+            self.warning(
+                "This ACME provider is configured with a Let's Encrypt STAGING "
+                "directory URL. Staging certificates use fake CA chains that "
+                "cannot be imported into Cisco ISE. If this is a production "
+                "deployment, update the provider's directory URL to "
+                "https://acme-v02.api.letsencrypt.org/directory",
+                phase="acme_directory",
+            )
+
         self.info(
             f"Connecting to ACME directory {provider.directory_url}",
             phase="acme_directory",

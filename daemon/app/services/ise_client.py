@@ -358,10 +358,20 @@ class ISEClient:
                             detail = exc.response.text.strip()
                         except Exception:
                             detail = ""
+                    hint = ""
+                    if "(staging)" in friendly.lower():
+                        hint = (
+                            ". This is a Let's Encrypt STAGING intermediate — "
+                            "staging CA chains are not accepted by ISE. "
+                            "Switch the ACME provider's directory URL to the "
+                            "production endpoint: "
+                            "https://acme-v02.api.letsencrypt.org/directory"
+                        )
                     raise RuntimeError(
                         f"Failed to import intermediate CA '{friendly}' "
                         f"into ISE trusted store (HTTP {status})"
                         + (f": {detail}" if detail else "")
+                        + hint
                     ) from exc
 
     def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
