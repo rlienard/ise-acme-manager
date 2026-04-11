@@ -695,6 +695,17 @@ class ISEClient:
             except Exception:
                 friendly = f"ACME-intermediate-{idx}"
 
+            # Sanitize the friendly name: ISE's trusted-certificate import
+            # API rejects names containing parentheses and other special
+            # characters with a generic "Security Check Failed" (HTTP 400).
+            # Let's Encrypt staging CAs use names like
+            # "(STAGING) Riddling Rhubarb R12" — the parentheses must be
+            # stripped before sending the name to ISE.
+            friendly = re.sub(r"[^A-Za-z0-9 _.\-]", "", friendly).strip()
+            friendly = re.sub(r" {2,}", " ", friendly)
+            if not friendly:
+                friendly = f"ACME-intermediate-{idx}"
+
             payload = {
                 "data": pem_block + "\n",
                 "name": friendly,
