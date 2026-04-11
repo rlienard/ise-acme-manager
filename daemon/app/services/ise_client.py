@@ -72,38 +72,30 @@ def _split_pem_chain(pem_chain: str) -> "list[str]":
 
 
 def _normalize_pem_for_ise(pem: str) -> str:
-    """Normalize a single PEM certificate so ISE's import API accepts it.
+    """Normalize a PEM payload so ISE's import API accepts it.
 
-    Cisco ISE's ``/certs/trusted-certificate/import`` endpoint rejects
-    payloads that contain carriage returns or blank lines inside the
-    certificate with a generic HTTP 400 ``Security Check Failed`` error.
-    The official Cisco documentation provides this preparation command::
+    Cisco ISE's ``/certs/trusted-certificate/import`` endpoint is
+    sensitive to the exact byte content of the ``data`` field.  A known
+    working Python implementation (referenced against a real ISE
+    deployment) uses a minimal normalization:
 
-        awk 'NF {sub(/\\r/, ""); printf "%s\\n",$0;}' <file.pem>
+    - Strip all ``\\r`` carriage returns.
+    - Ensure exactly one trailing ``\\n``.
 
-    which (1) filters out blank lines (``NF``), (2) strips any ``\\r``
-    carriage returns, and (3) re-joins lines with ``\\n``.
+    Blank lines inside the PEM are **not** removed — the working
+    reference accepts them, and removing them empirically yields no
+    improvement.  This helper therefore mirrors the reference
+    implementation byte for byte.
 
-    When ``requests`` serializes a Python string containing ``\\r\\n``
-    into a JSON body, it faithfully preserves the ``\\r`` — so the PEM
-    returned by Let's Encrypt (which is often delivered with CRLF line
-    endings through reverse proxies) is rejected by ISE.
-
-    This helper performs the same normalization as the Cisco awk
-    command: strips ``\\r``, drops blank lines, and ensures exactly
-    one trailing ``\\n``.  It is safe to call on an already-normalized
-    PEM — the result is idempotent.
+    This helper is idempotent on already-normalized input.  Empty
+    input returns an empty string.
     """
     if not pem:
         return ""
-    # 1. Drop any CR characters anywhere in the string.
     text = pem.replace("\r", "")
-    # 2. Split into lines and drop any line that is empty after stripping.
-    lines = [ln for ln in text.split("\n") if ln.strip()]
-    if not lines:
-        return ""
-    # 3. Re-join with LF and ensure a single trailing LF.
-    return "\n".join(lines) + "\n"
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
 
 
 def _get_aki(cert_obj: x509.Certificate) -> "bytes | None":
@@ -714,16 +706,21 @@ class ISEClient:
         to return HTTP 400 ``Security Check Failed``, so this method
         always imports one certificate per request.
 
+        **Minimal payload.**  The request body mirrors a known-working
+        reference implementation byte-for-byte: only 7 fields are sent,
+        and none of the ``trustFor*`` flags are included.  Extra flags
+        trigger additional server-side validation that some ISE
+        versions reject with a generic "Security Check Failed" error.
+
+        **Field-name spelling.**  Some ISE builds spell the CA-False
+        flag as ``allowBasicConstraintsCAFalse`` (with an ``S``) while
+        others use ``allowBasicConstraintCAFalse`` (no ``S``).  This
+        method tries the former first and, on HTTP 400, retries with
+        the alternate spelling.
+
         **Normalization.**  Every PEM block is passed through
-        :func:`_normalize_pem_for_ise` before being sent.  The Cisco
-        documentation preparation command is::
-
-            awk 'NF {sub(/\\r/, ""); printf "%s\\n",$0;}' <file.pem>
-
-        i.e. strip ``\\r``, drop blank lines, and re-join lines with
-        ``\\n``.  Without this step, PEMs that arrive from ACME servers
-        with CRLF line endings are rejected by ISE because ``requests``
-        preserves the ``\\r`` inside the JSON body.
+        :func:`_normalize_pem_for_ise` before being sent: ``\\r`` is
+        stripped and a trailing ``\\n`` is ensured.
 
         **Ordering.**  Certificates are imported root-first so that each
         certificate's issuer is already trusted by ISE when the next one
@@ -822,27 +819,53 @@ class ISEClient:
                 idx + 1, total, friendly, len(normalized_pem), normalized_pem,
             )
 
+            # Payload matches a known-working reference implementation
+            # byte-for-byte: the minimal set of 7 fields (no trustFor*),
+            # with ``allowBasicConstraintsCAFalse`` (note the 'S') set to
+            # False.  Extra fields such as ``trustForCertificateBasedAdminAuth``
+            # trigger additional server-side checks that cause the generic
+            # "Security Check Failed" error on some ISE versions.
             payload = {
-                "data": normalized_pem,
                 "name": friendly,
                 "description": "Imported automatically by ACME Manager",
-                "allowBasicConstraintCAFalse": True,
+                "data": normalized_pem,
                 "allowOutOfDateCert": False,
                 "allowSHA1Certificates": False,
-                "trustForCertificateBasedAdminAuth": True,
-                "trustForCiscoServicesAuth": True,
-                "trustForClientAuth": True,
-                "trustForIseAuth": True,
+                "allowBasicConstraintsCAFalse": False,
                 "validateCertificateExtensions": False,
             }
             logger.info(
                 "Importing CA certificate [%d/%d] '%s' into ISE trusted store...",
                 idx + 1, total, friendly,
             )
-            try:
-                resp = self.session.post(
-                    url, json=payload, headers=csrf_headers, timeout=30
+
+            def _post_trust_payload(p):
+                return self.session.post(
+                    url, json=p, headers=csrf_headers, timeout=30,
                 )
+
+            try:
+                resp = _post_trust_payload(payload)
+                # Some ISE builds spell the field without the trailing 'S'
+                # (``allowBasicConstraintCAFalse``).  If the first attempt
+                # is rejected with HTTP 400, retry with the alternate
+                # spelling before giving up.
+                if resp.status_code == 400:
+                    logger.info(
+                        "Trust import for '%s' returned HTTP 400 with "
+                        "'allowBasicConstraintsCAFalse'; retrying with "
+                        "'allowBasicConstraintCAFalse' (no 'S')",
+                        friendly,
+                    )
+                    retry_payload = dict(payload)
+                    retry_payload.pop("allowBasicConstraintsCAFalse", None)
+                    retry_payload["allowBasicConstraintCAFalse"] = False
+                    # Fetch a fresh CSRF token — ISE invalidates the token
+                    # even on rejected mutating requests on some versions.
+                    retry_token = self._fetch_csrf_token()
+                    if retry_token:
+                        csrf_headers = {"X-CSRF-Token": retry_token}
+                    resp = _post_trust_payload(retry_payload)
                 resp.raise_for_status()
                 logger.info(
                     "Successfully imported CA [%d/%d] '%s'",
