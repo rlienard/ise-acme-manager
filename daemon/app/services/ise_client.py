@@ -71,6 +71,41 @@ def _split_pem_chain(pem_chain: str) -> "list[str]":
     )
 
 
+def _normalize_pem_for_ise(pem: str) -> str:
+    """Normalize a single PEM certificate so ISE's import API accepts it.
+
+    Cisco ISE's ``/certs/trusted-certificate/import`` endpoint rejects
+    payloads that contain carriage returns or blank lines inside the
+    certificate with a generic HTTP 400 ``Security Check Failed`` error.
+    The official Cisco documentation provides this preparation command::
+
+        awk 'NF {sub(/\\r/, ""); printf "%s\\n",$0;}' <file.pem>
+
+    which (1) filters out blank lines (``NF``), (2) strips any ``\\r``
+    carriage returns, and (3) re-joins lines with ``\\n``.
+
+    When ``requests`` serializes a Python string containing ``\\r\\n``
+    into a JSON body, it faithfully preserves the ``\\r`` — so the PEM
+    returned by Let's Encrypt (which is often delivered with CRLF line
+    endings through reverse proxies) is rejected by ISE.
+
+    This helper performs the same normalization as the Cisco awk
+    command: strips ``\\r``, drops blank lines, and ensures exactly
+    one trailing ``\\n``.  It is safe to call on an already-normalized
+    PEM — the result is idempotent.
+    """
+    if not pem:
+        return ""
+    # 1. Drop any CR characters anywhere in the string.
+    text = pem.replace("\r", "")
+    # 2. Split into lines and drop any line that is empty after stripping.
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return ""
+    # 3. Re-join with LF and ensure a single trailing LF.
+    return "\n".join(lines) + "\n"
+
+
 def _get_aki(cert_obj: x509.Certificate) -> "bytes | None":
     """Extract the Authority Key Identifier (key_identifier bytes), or *None*."""
     try:
@@ -671,26 +706,40 @@ class ISEClient:
         ISE must already trust every certificate in the chain above the
         leaf in order for ``system-certificate/import`` to succeed.
 
-        Uses :func:`split_certificate_chain` to extract the CA bundle
-        (intermediates + root) and first attempts to import the
-        concatenated ``ca_chain`` PEM in a **single** API call.  If ISE
-        rejects the multi-cert PEM (HTTP 400/500), the method falls back
-        to importing each certificate individually in root-first order so
-        that each cert's issuer is already trusted before the next one is
-        uploaded.
+        **One certificate per API call.**  Cisco ISE's
+        ``/certs/trusted-certificate/import`` endpoint explicitly accepts
+        a single PEM-encoded certificate in the ``data`` field — the
+        official documentation uses ``awk`` against a single ``.pem``
+        file.  Attempting to send a multi-cert bundle has been observed
+        to return HTTP 400 ``Security Check Failed``, so this method
+        always imports one certificate per request.
 
-        HTTP 409 (certificate already exists) is silently ignored in both
-        the single-call and fallback paths.
+        **Normalization.**  Every PEM block is passed through
+        :func:`_normalize_pem_for_ise` before being sent.  The Cisco
+        documentation preparation command is::
+
+            awk 'NF {sub(/\\r/, ""); printf "%s\\n",$0;}' <file.pem>
+
+        i.e. strip ``\\r``, drop blank lines, and re-join lines with
+        ``\\n``.  Without this step, PEMs that arrive from ACME servers
+        with CRLF line endings are rejected by ISE because ``requests``
+        preserves the ``\\r`` inside the JSON body.
+
+        **Ordering.**  Certificates are imported root-first so that each
+        certificate's issuer is already trusted by ISE when the next one
+        is uploaded.
+
+        HTTP 409 (certificate already exists) is silently ignored.
         """
         components = split_certificate_chain(pem_chain)
-        ca_chain = components["ca_chain"]
 
-        if not ca_chain.strip():
+        if not components["ca_chain"].strip():
             # No intermediates or root — nothing to upload.
             return
 
-        # Build an ordered list of individual CA PEM blocks (root-first)
-        # for the fallback path and for logging.
+        # Build an ordered list of individual CA PEM blocks.
+        # _split_pem_chain yields the ordered list
+        # (intermediate-closest-to-leaf first, then root last).
         ca_blocks_leaf_first: "list[str]" = []
         if components["intermediate"].strip():
             ca_blocks_leaf_first.extend(
@@ -700,98 +749,20 @@ class ISEClient:
             ca_blocks_leaf_first.extend(
                 _split_pem_chain(components["root"])
             )
+        # Import root-first so each cert's issuer is already trusted.
         ca_blocks_root_first = list(reversed(ca_blocks_leaf_first))
 
         total = len(ca_blocks_root_first)
-        logger.info(
-            "Preparing to import CA chain bundle (%d certificate(s): "
-            "%d intermediate(s) + %s root) into ISE trusted store.",
-            total,
-            len(_split_pem_chain(components["intermediate"])) if components["intermediate"].strip() else 0,
-            "1" if components["root"].strip() else "no",
+        num_intermediates = (
+            len(_split_pem_chain(components["intermediate"]))
+            if components["intermediate"].strip() else 0
         )
-
-        url = f"{self.base_url}/certs/trusted-certificate/import"
-
-        # ── Attempt: single concatenated import ─────────────────────────
-        # Derive a friendly name from the first intermediate (or root when
-        # there are no intermediates).
-        first_ca_pem = ca_blocks_root_first[-1] if ca_blocks_root_first else ""
-        try:
-            first_ca_obj = x509.load_pem_x509_certificate(
-                (first_ca_pem.strip() + "\n").encode("utf-8")
-            )
-            cn_attrs = first_ca_obj.subject.get_attributes_for_oid(
-                x509.oid.NameOID.COMMON_NAME
-            )
-            bundle_name = cn_attrs[0].value if cn_attrs else "ACME-CA-chain"
-        except Exception:
-            bundle_name = "ACME-CA-chain"
-
-        bundle_name = re.sub(r"[^A-Za-z0-9 _.\-]", "", bundle_name).strip()
-        bundle_name = re.sub(r" {2,}", " ", bundle_name)
-        if not bundle_name:
-            bundle_name = "ACME-CA-chain"
-
-        csrf_token = self._fetch_csrf_token()
-        csrf_headers = {"X-CSRF-Token": csrf_token} if csrf_token else {}
-        single_payload = {
-            "data": ca_chain,
-            "name": bundle_name,
-            "description": "Imported automatically by ACME Manager",
-            "allowBasicConstraintCAFalse": True,
-            "allowOutOfDateCert": False,
-            "allowSHA1Certificates": False,
-            "trustForCertificateBasedAdminAuth": True,
-            "trustForCiscoServicesAuth": True,
-            "trustForClientAuth": True,
-            "trustForIseAuth": True,
-            "validateCertificateExtensions": False,
-        }
+        has_root = bool(components["root"].strip())
         logger.info(
-            "Importing CA chain bundle '%s' into ISE trusted store "
-            "(single concatenated call)...", bundle_name,
-        )
-        try:
-            resp = self.session.post(
-                url, json=single_payload, headers=csrf_headers, timeout=30
-            )
-            resp.raise_for_status()
-            logger.info(
-                "Successfully imported CA chain bundle '%s' into ISE trusted store.",
-                bundle_name,
-            )
-            return  # single import succeeded — nothing more to do
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
-            if status == 409:
-                logger.info(
-                    "CA chain bundle '%s' already exists in ISE trusted store.",
-                    bundle_name,
-                )
-                return
-            # Any other error: fall through to the individual-import path.
-            detail = ""
-            if exc.response is not None:
-                try:
-                    detail = exc.response.text.strip()
-                except Exception:
-                    detail = ""
-            logger.warning(
-                "Single concatenated CA chain import failed (HTTP %s): %s. "
-                "Falling back to importing each certificate individually.",
-                status, detail or "(empty)",
-            )
-        except Exception as exc:
-            logger.warning(
-                "Single concatenated CA chain import raised an unexpected "
-                "error: %s. Falling back to individual imports.", exc,
-            )
-
-        # ── Fallback: import each certificate individually (root-first) ──
-        logger.info(
-            "Will import %d CA certificate(s) individually into ISE trusted "
-            "store (root-first order):", total,
+            "Will import %d CA certificate(s) into ISE trusted store "
+            "(root-first order, one POST per certificate): "
+            "%d intermediate(s) + %s root",
+            total, num_intermediates, "1" if has_root else "no",
         )
         for i, blk in enumerate(ca_blocks_root_first):
             try:
@@ -812,9 +783,11 @@ class ISEClient:
             except Exception:
                 logger.info("  [%d/%d] (could not parse certificate)", i + 1, total)
 
+        url = f"{self.base_url}/certs/trusted-certificate/import"
+
         for idx, pem_block in enumerate(ca_blocks_root_first):
-            # Fetch a fresh CSRF token for each import: ISE invalidates the
-            # token after every successful mutating request.
+            # Fetch a fresh CSRF token for each import: ISE invalidates
+            # the token after every successful mutating request.
             csrf_token = self._fetch_csrf_token()
             csrf_headers = {"X-CSRF-Token": csrf_token} if csrf_token else {}
 
@@ -830,13 +803,27 @@ class ISEClient:
                 friendly = f"ACME-intermediate-{idx}"
                 cert_obj = None
 
+            # Sanitize name: ISE rejects names with parentheses and other
+            # special characters with a generic "Security Check Failed".
             friendly = re.sub(r"[^A-Za-z0-9 _.\-]", "", friendly).strip()
             friendly = re.sub(r" {2,}", " ", friendly)
             if not friendly:
                 friendly = f"ACME-intermediate-{idx}"
 
+            # Normalize the PEM to the exact format ISE expects:
+            # no CR, no blank lines, single LF terminator.
+            normalized_pem = _normalize_pem_for_ise(pem_block)
+
+            # Diagnostic: log the byte-level content of what we're about
+            # to POST, so the operator can verify formatting issues by
+            # inspecting the log.
+            logger.debug(
+                "CA [%d/%d] '%s' normalized PEM (%d bytes): %r",
+                idx + 1, total, friendly, len(normalized_pem), normalized_pem,
+            )
+
             payload = {
-                "data": pem_block.strip() + "\n",
+                "data": normalized_pem,
                 "name": friendly,
                 "description": "Imported automatically by ACME Manager",
                 "allowBasicConstraintCAFalse": True,
@@ -887,9 +874,10 @@ class ISEClient:
                         issuer_cn = "(unknown)"
                     logger.error(
                         "Failed to import CA [%d/%d] '%s' (HTTP %s): %s. "
-                        "Issuer (parent CA): '%s'",
+                        "Issuer (parent CA): '%s'. "
+                        "Sent %d bytes of PEM data.",
                         idx + 1, total, friendly, status,
-                        detail or "(empty)", issuer_cn,
+                        detail or "(empty)", issuer_cn, len(normalized_pem),
                     )
                     hint = (
                         f". Verify that the issuer CA '{issuer_cn}' is "
@@ -976,7 +964,17 @@ class ISEClient:
         if raw_cert:
             blocks = _split_pem_chain(raw_cert)
             if blocks:
-                raw_cert = blocks[0] + "\n"  # leaf only
+                # Leaf only, normalized to the exact format ISE expects
+                # (no CR, no blank lines, single LF terminator) — same
+                # rules as the trusted-certificate import endpoint.
+                raw_cert = _normalize_pem_for_ise(blocks[0])
+
+        # The system-certificate/import endpoint is just as picky about
+        # the private-key format as it is about the leaf. Apply the same
+        # CR/blank-line normalization so CRLF-terminated keys (common
+        # when delivered via a reverse proxy) don't trip the import.
+        if private_key_pem:
+            private_key_pem = _normalize_pem_for_ise(private_key_pem)
 
         url = f"{self.base_url}/certs/system-certificate/import"
 
