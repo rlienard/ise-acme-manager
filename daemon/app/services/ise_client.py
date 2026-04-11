@@ -676,10 +676,13 @@ class ISEClient:
 
         url = f"{self.base_url}/certs/trusted-certificate/import"
 
-        csrf_token = self._fetch_csrf_token()
-        csrf_headers = {"X-CSRF-Token": csrf_token} if csrf_token else {}
-
         for idx, pem_block in enumerate(intermediates):
+            # Fetch a fresh CSRF token for each import: ISE invalidates the
+            # token after every successful mutating request, so reusing one
+            # token across multiple POSTs causes a 403 on the second import.
+            csrf_token = self._fetch_csrf_token()
+            csrf_headers = {"X-CSRF-Token": csrf_token} if csrf_token else {}
+
             # Derive a human-readable name from the certificate subject.
             try:
                 cert_obj = x509.load_pem_x509_certificate(
