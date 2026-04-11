@@ -275,6 +275,15 @@ const api = {
         URL.revokeObjectURL(url);
     },
 
+    /**
+     * Parse a PEM bundle and return a human-readable summary of each
+     * certificate.  Used by the frontend to show the content of the
+     * leaf / CA chain before the user confirms an ISE push.
+     */
+    decodeCertificateChain(pem) {
+        return this.request('POST', '/api/v1/certificates/decode-chain', { pem });
+    },
+
     // ACME Providers
     getACMEProviders() { return this.request('GET', '/api/v1/acme-providers'); },
     getACMEProvider(id) { return this.request('GET', `/api/v1/acme-providers/${id}`); },

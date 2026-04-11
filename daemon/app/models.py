@@ -440,6 +440,13 @@ class CertificateIsePushPayload(BaseModel):
     Payload for the /push-to-ise SSE endpoint.  Carries the already-obtained
     cert+key and the ISE targeting parameters so the ISE import can be
     triggered independently of the ACME issuance step.
+
+    The optional ``phase`` field lets the caller split the push into two
+    user-confirmed steps:
+
+    - ``"ca_chain"`` — only upload the CA chain to the trusted store
+    - ``"leaf"`` — only import the leaf certificate and bind to portal
+    - ``"all"`` (default) — run the full push in one call
     """
     cert_pem: str
     key_pem: str
@@ -448,6 +455,7 @@ class CertificateIsePushPayload(BaseModel):
     portal_group_tag: str
     certificate_mode: str = "shared"
     usage: str = "Portal"
+    phase: str = "all"
 
 
 class CertificateDownloadBundlePayload(BaseModel):
@@ -459,6 +467,15 @@ class CertificateDownloadBundlePayload(BaseModel):
     intermediate_pem: Optional[str] = None
     root_pem: Optional[str] = None
     ca_chain_pem: Optional[str] = None
+
+
+class CertificateDecodePayload(BaseModel):
+    """Payload for the /decode-chain endpoint.
+
+    Used by the frontend to show a human-readable summary of a PEM
+    bundle before the user confirms an ISE push.
+    """
+    pem: str
 
 
 class ManagedCertificateResponse(BaseModel):

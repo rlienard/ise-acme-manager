@@ -298,6 +298,7 @@ class CertificateRequestRunner:
         node_ids: "list[int]",
         portal_group_tag: str,
         certificate_mode: str = "shared",
+        phase: str = "all",
     ) -> None:
         """Import an already-obtained certificate into all target ISE nodes.
 
@@ -305,7 +306,27 @@ class CertificateRequestRunner:
         cert+key obtained by ``run_acme_phase`` (or passed back from the
         browser after a ``cert_obtained`` SSE event) and handles ISE
         import, portal binding, and secondary-node distribution.
+
+        Args:
+            phase: Controls which steps to execute.  Supported values:
+
+                - ``"all"`` (default): run the full push — upload CA
+                  chain to the trusted store, import the leaf, bind to
+                  portal, then distribute to secondary nodes.
+                - ``"ca_chain"``: only upload the intermediate + root
+                  CA certificates to ISE's trusted-certificate store
+                  (once, against the primary node's API).  Returns
+                  without touching the leaf or the secondaries.
+                - ``"leaf"``: skip the CA chain upload (it is expected
+                  to have already been imported in a previous
+                  ``"ca_chain"`` call) and run the leaf import, portal
+                  bind, and secondary distribution.
         """
+        if phase not in ("all", "ca_chain", "leaf"):
+            raise CertificateRequestError(
+                f"Invalid push phase: {phase!r}"
+            )
+
         config = ConfigManager.get_flat(self.db)
         ise = ISEClient(config)
         nodes = (
@@ -318,6 +339,33 @@ class CertificateRequestRunner:
         primary = self._pick_primary(nodes)
         secondaries = [n for n in nodes if n.id != primary.id]
 
+        # ── Phase: CA chain only ────────────────────────────────
+        if phase == "ca_chain":
+            self.info(
+                "Uploading CA chain (intermediate + root) to ISE trusted "
+                "certificate store",
+                phase="trusted_import",
+            )
+            ise.import_certificate(
+                {"certData": cert_pem, "privateKeyData": key_pem},
+                primary.name,
+                portal_group_tag,
+                import_ca_chain=True,
+                import_leaf=False,
+            )
+            self.success(
+                "CA chain uploaded to ISE trusted certificate store",
+                phase="trusted_import",
+            )
+            return
+
+        # ── Phase: leaf-only (and 'all') ────────────────────────
+        # For "leaf" we skip the CA chain upload (assumed to have been
+        # done in a prior "ca_chain" call).  For "all" we still upload
+        # the CA chain here, which preserves backwards compatibility
+        # for callers that haven't been updated to the two-phase flow.
+        import_ca = (phase == "all")
+
         # ── Primary node ──
         self.info(
             f"Importing certificate into ISE node {primary.name}",
@@ -327,6 +375,8 @@ class CertificateRequestRunner:
             {"certData": cert_pem, "privateKeyData": key_pem},
             primary.name,
             portal_group_tag,
+            import_ca_chain=import_ca,
+            import_leaf=True,
         )
         self.success(f"Certificate imported on {primary.name}", phase="import")
 
@@ -356,6 +406,10 @@ class CertificateRequestRunner:
                     {"certData": cert_pem, "privateKeyData": key_pem},
                     node.name,
                     portal_group_tag,
+                    # CA chain has already been uploaded on the primary,
+                    # so secondaries never need to re-upload it.
+                    import_ca_chain=False,
+                    import_leaf=True,
                 )
                 dist_imported = ise.get_certificate_by_cn(common_name, node.name)
                 if dist_imported:

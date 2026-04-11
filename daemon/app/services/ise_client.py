@@ -903,7 +903,14 @@ class ISEClient:
                         + hint
                     ) from exc
 
-    def import_certificate(self, cert_data: dict, node_name: str, portal_group_tag: str) -> dict:
+    def import_certificate(
+        self,
+        cert_data: dict,
+        node_name: str,
+        portal_group_tag: str,
+        import_ca_chain: bool = True,
+        import_leaf: bool = True,
+    ) -> dict:
         """
         Import a certificate to an ISE node.
 
@@ -912,9 +919,20 @@ class ISEClient:
         identified by the ``name`` field in the JSON body — it is **not**
         part of the URL path. Older ``/certs/system-certificate/{node}/import``
         paths do not accept POST and will return HTTP 405.
-        """
-        url = f"{self.base_url}/certs/system-certificate/import"
 
+        Args:
+            import_ca_chain: When True (default), upload the intermediate
+                and root CA certificates to ISE's trusted-certificate
+                store before importing the leaf.  Set to False to skip
+                this step (e.g. when the CA chain has already been
+                imported in a prior call).
+            import_leaf: When True (default), import the leaf
+                certificate and its private key into ISE's
+                system-certificate store.  Set to False to only import
+                the CA chain into the trusted store without touching
+                the leaf.  When False the function returns an empty
+                dict.
+        """
         # ISE's import endpoint rejects unencrypted private keys with a
         # generic "Security Check Failed" error. LetsEncrypt (and any
         # freshly generated key from our ACME client) returns the key in
@@ -926,7 +944,7 @@ class ISEClient:
         # EncryptedPrivateKeyInfo or traditional OpenSSL Proc-Type header).
         private_key_pem = cert_data.get("privateKeyData")
         password = cert_data.get("password") or ""
-        if private_key_pem:
+        if private_key_pem and import_leaf:
             try:
                 serialization.load_pem_private_key(
                     private_key_pem.encode("utf-8") if isinstance(private_key_pem, str)
@@ -948,11 +966,19 @@ class ISEClient:
         # requires the intermediates to be present in its trusted store.
         # We therefore upload intermediates first, then import the leaf.
         raw_cert = cert_data.get("certData") or cert_data.get("data") or ""
-        if raw_cert:
+        if raw_cert and import_ca_chain:
             self._ensure_intermediates_trusted(raw_cert)
+
+        if not import_leaf:
+            # Caller asked for CA chain only — stop here.
+            return {}
+
+        if raw_cert:
             blocks = _split_pem_chain(raw_cert)
             if blocks:
                 raw_cert = blocks[0] + "\n"  # leaf only
+
+        url = f"{self.base_url}/certs/system-certificate/import"
 
         # Note: every ``allow*`` boolean must be supplied explicitly.
         # Newer ISE builds reject the request with HTTP 400

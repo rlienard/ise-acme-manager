@@ -27,9 +27,13 @@ from ..models import (
     CertificateRequestPayload,
     CertificateIsePushPayload,
     CertificateDownloadBundlePayload,
+    CertificateDecodePayload,
 )
 from ..services.cert_request import CertificateRequestRunner, CertificateRequestError
-from ..services.ise_client import split_certificate_chain
+from ..services.ise_client import split_certificate_chain, _split_pem_chain
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 
 logger = logging.getLogger(__name__)
 
@@ -325,12 +329,21 @@ def push_certificate_to_ise(payload: CertificateIsePushPayload):
                 node_ids=payload.node_ids,
                 portal_group_tag=payload.portal_group_tag,
                 certificate_mode=payload.certificate_mode,
+                phase=payload.phase,
             )
+            phase_messages = {
+                "ca_chain": "CA chain uploaded to ISE trusted certificate store",
+                "leaf": "Leaf certificate imported and bound on ISE",
+                "all": "Certificate pushed to ISE successfully",
+            }
             events.put({
                 "event": "complete",
                 "data": {
                     "success": True,
-                    "message": "Certificate pushed to ISE successfully",
+                    "message": phase_messages.get(
+                        payload.phase, "Certificate pushed to ISE successfully"
+                    ),
+                    "phase": payload.phase,
                 },
             })
         except CertificateRequestError as e:
@@ -407,3 +420,108 @@ def download_certificate_bundle(payload: CertificateDownloadBundlePayload):
             "Content-Disposition": f'attachment; filename="{safe_cn}-bundle.zip"',
         },
     )
+
+
+def _describe_certificate(pem_block: str) -> dict:
+    """Parse a single PEM certificate and return a human-readable summary."""
+    cert = x509.load_pem_x509_certificate(
+        (pem_block.strip() + "\n").encode("utf-8")
+    )
+
+    def _name_to_str(name: x509.Name) -> str:
+        try:
+            return name.rfc4514_string()
+        except Exception:
+            return str(name)
+
+    def _cn(name: x509.Name) -> str:
+        try:
+            attrs = name.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+            return attrs[0].value if attrs else ""
+        except Exception:
+            return ""
+
+    san_dns: list = []
+    try:
+        san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        san_dns = list(san_ext.value.get_values_for_type(x509.DNSName))
+    except x509.ExtensionNotFound:
+        pass
+    except Exception:
+        pass
+
+    try:
+        fingerprint = cert.fingerprint(hashes.SHA256()).hex().upper()
+        fingerprint_colon = ":".join(
+            fingerprint[i:i + 2] for i in range(0, len(fingerprint), 2)
+        )
+    except Exception:
+        fingerprint_colon = ""
+
+    try:
+        serial_hex = format(cert.serial_number, "X")
+    except Exception:
+        serial_hex = ""
+
+    is_self_signed = cert.issuer == cert.subject
+
+    # Use the *_utc variants where available to avoid deprecation warnings.
+    try:
+        not_before = cert.not_valid_before_utc.isoformat()
+        not_after = cert.not_valid_after_utc.isoformat()
+    except AttributeError:
+        not_before = cert.not_valid_before.isoformat() + "Z"
+        not_after = cert.not_valid_after.isoformat() + "Z"
+
+    return {
+        "subject": _name_to_str(cert.subject),
+        "subject_cn": _cn(cert.subject),
+        "issuer": _name_to_str(cert.issuer),
+        "issuer_cn": _cn(cert.issuer),
+        "serial_number": serial_hex,
+        "not_before": not_before,
+        "not_after": not_after,
+        "san_dns": san_dns,
+        "fingerprint_sha256": fingerprint_colon,
+        "is_self_signed": is_self_signed,
+        "pem": pem_block.strip() + "\n",
+    }
+
+
+@router.post("/decode-chain")
+def decode_certificate_chain(payload: CertificateDecodePayload):
+    """
+    Parse a PEM bundle and return a human-readable summary of each
+    certificate it contains.
+
+    Used by the frontend to show the contents of the leaf or CA chain
+    before the user confirms an ISE push.
+    """
+    if not payload.pem or not payload.pem.strip():
+        return {"certificates": []}
+
+    blocks = _split_pem_chain(payload.pem)
+    certificates: list = []
+    for idx, blk in enumerate(blocks):
+        try:
+            certificates.append(_describe_certificate(blk))
+        except Exception as e:
+            logger.warning(
+                "decode-chain: failed to parse certificate block %d: %s", idx, e
+            )
+            certificates.append({
+                "subject": "(unparseable)",
+                "subject_cn": "",
+                "issuer": "",
+                "issuer_cn": "",
+                "serial_number": "",
+                "not_before": "",
+                "not_after": "",
+                "san_dns": [],
+                "fingerprint_sha256": "",
+                "is_self_signed": False,
+                "pem": blk.strip() + "\n",
+                "error": str(e),
+            })
+
+    return {"certificates": certificates}

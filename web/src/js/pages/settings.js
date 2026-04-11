@@ -2289,20 +2289,97 @@ const Settings = {
         }
     },
 
+    // ── Two-step verified ISE push ──────────────────────────
+    //
+    // Flow:
+    //   1. User clicks "Push to Cisco ISE"
+    //   2. _onPushToIse() fetches the decoded CA chain and shows a
+    //      confirmation modal with its content.
+    //   3. On "Continue", the CA chain is pushed to ISE (phase="ca_chain")
+    //      and progress is streamed into the live log overlay.
+    //   4. Once the CA chain upload completes, the leaf certificate
+    //      confirmation modal is shown.
+    //   5. On "Continue", the leaf is pushed to ISE (phase="leaf") and
+    //      progress is streamed again.
+    //   6. On success, the final success state is rendered.
+
     async _onPushToIse() {
+        if (!this._pendingCertData) return;
+        const d = this._pendingCertData;
+
+        // 1) Decode the CA chain for display.
+        const caPem = d.ca_chain_pem || '';
+        if (!caPem.trim()) {
+            Toast.error('No CA chain available to push — cannot verify.');
+            return;
+        }
+
+        let caDecoded;
+        try {
+            caDecoded = await api.decodeCertificateChain(caPem);
+        } catch (e) {
+            Toast.error('Failed to decode CA chain: ' + (e.message || String(e)));
+            return;
+        }
+
+        // 2) Show the CA chain verification modal.  When the user
+        //    clicks Continue, push the CA chain to ISE, then move on
+        //    to the leaf verification step.
+        this._showCertVerifyModal({
+            title: 'Step 1/2 — Verify CA chain',
+            subtitle: 'About to upload to ISE <strong>Trusted Certificate Store</strong>:',
+            certificates: caDecoded.certificates || [],
+            rawPem: caPem,
+            onContinue: () => this._pushIsePhase('ca_chain', () => this._verifyAndPushLeaf()),
+        });
+    },
+
+    async _verifyAndPushLeaf() {
+        if (!this._pendingCertData) return;
+        const d = this._pendingCertData;
+        const leafPem = d.leaf_pem || '';
+        if (!leafPem.trim()) {
+            Toast.error('No leaf certificate available to push — cannot verify.');
+            return;
+        }
+
+        let leafDecoded;
+        try {
+            leafDecoded = await api.decodeCertificateChain(leafPem);
+        } catch (e) {
+            Toast.error('Failed to decode leaf certificate: ' + (e.message || String(e)));
+            return;
+        }
+
+        this._showCertVerifyModal({
+            title: 'Step 2/2 — Verify leaf certificate',
+            subtitle: 'About to import into ISE <strong>System Certificate Store</strong>:',
+            certificates: leafDecoded.certificates || [],
+            rawPem: leafPem,
+            onContinue: () => this._pushIsePhase('leaf', null),
+        });
+    },
+
+    async _pushIsePhase(phase, onPhaseSuccess) {
         if (!this._pendingCertData) return;
         const d = this._pendingCertData;
 
         const pushBtn = document.getElementById('cert-log-push-ise-btn');
         if (pushBtn) {
             pushBtn.disabled = true;
-            pushBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Pushing\u2026';
+            const label = phase === 'ca_chain'
+                ? 'Uploading CA chain\u2026'
+                : 'Importing leaf\u2026';
+            pushBtn.innerHTML = `<i class="fas fa-circle-notch fa-spin"></i> ${label}`;
         }
 
         const status = document.getElementById('cert-log-status');
         if (status) {
+            const label = phase === 'ca_chain'
+                ? 'Uploading CA chain to ISE\u2026'
+                : 'Importing leaf into ISE\u2026';
             status.className = 'cert-log-status running';
-            status.innerHTML = '<span class="cert-log-spinner"><i class="fas fa-circle-notch fa-spin"></i></span><span>Pushing to ISE\u2026</span>';
+            status.innerHTML = `<span class="cert-log-spinner"><i class="fas fa-circle-notch fa-spin"></i></span><span>${label}</span>`;
         }
 
         try {
@@ -2315,24 +2392,152 @@ const Settings = {
                     portal_group_tag: d.portal_group_tag,
                     certificate_mode: d.certificate_mode,
                     usage: d.usage,
+                    phase: phase,
                 },
                 {
                     onLog: (evt) => this._appendCertRequestLog(evt),
                     onComplete: (evt) => {
-                        if (pushBtn) pushBtn.style.display = 'none';
-                        this._completeCertRequestLog(evt);
-                        if (evt && evt.success) this.fetchISECertificates().catch(() => {});
+                        const success = evt && evt.success;
+                        if (!success) {
+                            if (pushBtn) {
+                                pushBtn.disabled = false;
+                                pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE';
+                            }
+                            this._completeCertRequestLog(evt);
+                            return;
+                        }
+                        if (onPhaseSuccess) {
+                            // Intermediate phase: keep the overlay open
+                            // and chain to the next step.
+                            if (status) {
+                                status.className = 'cert-log-status success';
+                                status.innerHTML = '<i class="fas fa-check-circle"></i><span>CA chain uploaded</span>';
+                            }
+                            onPhaseSuccess();
+                        } else {
+                            // Terminal phase: finalize the overlay.
+                            if (pushBtn) pushBtn.style.display = 'none';
+                            this._completeCertRequestLog(evt);
+                            this.fetchISECertificates().catch(() => {});
+                        }
                     },
                     onError: (err) => {
-                        if (pushBtn) { pushBtn.disabled = false; pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE'; }
+                        if (pushBtn) {
+                            pushBtn.disabled = false;
+                            pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE';
+                        }
                         this._completeCertRequestLog({ success: false, message: err.message || String(err) });
                     },
                 }
             );
         } catch (e) {
-            if (pushBtn) { pushBtn.disabled = false; pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE'; }
+            if (pushBtn) {
+                pushBtn.disabled = false;
+                pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE';
+            }
             this._completeCertRequestLog({ success: false, message: String(e) });
         }
+    },
+
+    // ── Verification modal ──────────────────────────────────
+
+    _showCertVerifyModal({ title, subtitle, certificates, rawPem, onContinue }) {
+        let overlay = document.getElementById('cert-verify-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'cert-verify-overlay';
+            overlay.className = 'cert-log-overlay';
+            overlay.innerHTML = `
+                <div class="cert-log-modal">
+                    <div class="cert-log-header">
+                        <h3>
+                            <i class="fas fa-shield-alt"></i>
+                            <span id="cert-verify-title">Verify certificate</span>
+                        </h3>
+                        <div class="cert-log-status running">
+                            <i class="fas fa-eye"></i>
+                            <span>Review before push</span>
+                        </div>
+                    </div>
+                    <div class="cert-log-body" id="cert-verify-body"></div>
+                    <div class="cert-log-footer">
+                        <button class="btn btn-outline btn-sm" id="cert-verify-cancel-btn">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                        <button class="btn btn-primary btn-sm" id="cert-verify-continue-btn" style="margin-left:0.5rem;">
+                            <i class="fas fa-check"></i> Continue
+                        </button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+        }
+
+        const titleEl = overlay.querySelector('#cert-verify-title');
+        const body = overlay.querySelector('#cert-verify-body');
+        const cancelBtn = overlay.querySelector('#cert-verify-cancel-btn');
+        const continueBtn = overlay.querySelector('#cert-verify-continue-btn');
+
+        if (titleEl) titleEl.textContent = title;
+        if (body) body.innerHTML = this._renderVerifyBody(subtitle, certificates, rawPem);
+
+        // Wire buttons (replace handlers on each show).
+        if (cancelBtn) {
+            cancelBtn.onclick = () => {
+                overlay.style.display = 'none';
+                const pushBtn = document.getElementById('cert-log-push-ise-btn');
+                if (pushBtn) {
+                    pushBtn.disabled = false;
+                    pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE';
+                }
+            };
+        }
+        if (continueBtn) {
+            continueBtn.onclick = () => {
+                overlay.style.display = 'none';
+                if (typeof onContinue === 'function') onContinue();
+            };
+        }
+
+        overlay.style.display = 'flex';
+    },
+
+    _renderVerifyBody(subtitle, certificates, rawPem) {
+        const escape = (s) => this._escape(String(s == null ? '' : s));
+        const header = `<div style="font-family:var(--font-sans,sans-serif);font-size:0.85rem;color:var(--text);margin-bottom:0.75rem;">${subtitle || ''}</div>`;
+
+        const cards = (certificates || []).map((c, i) => {
+            const sans = (c.san_dns && c.san_dns.length)
+                ? `<div><strong>SAN (DNS):</strong> ${escape(c.san_dns.join(', '))}</div>`
+                : '';
+            const badge = c.is_self_signed
+                ? '<span class="cert-log-phase" style="background:rgba(46,204,113,0.18);color:var(--success);">ROOT (self-signed)</span>'
+                : '<span class="cert-log-phase">INTERMEDIATE</span>';
+            return `
+                <div style="border:1px solid var(--border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem;background:var(--card-bg);font-family:var(--font-sans,sans-serif);font-size:0.8rem;line-height:1.55;">
+                    <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+                        <strong style="color:var(--primary);">Certificate #${i + 1}</strong>
+                        ${certificates.length > 1 ? badge : ''}
+                    </div>
+                    <div><strong>Subject CN:</strong> ${escape(c.subject_cn || '(none)')}</div>
+                    <div><strong>Subject:</strong> ${escape(c.subject || '')}</div>
+                    <div><strong>Issuer CN:</strong> ${escape(c.issuer_cn || '(none)')}</div>
+                    <div><strong>Issuer:</strong> ${escape(c.issuer || '')}</div>
+                    <div><strong>Serial:</strong> <code>${escape(c.serial_number || '')}</code></div>
+                    <div><strong>Not before:</strong> ${escape(c.not_before || '')}</div>
+                    <div><strong>Not after:</strong> ${escape(c.not_after || '')}</div>
+                    ${sans}
+                    <div><strong>SHA-256 fingerprint:</strong> <code style="word-break:break-all;">${escape(c.fingerprint_sha256 || '')}</code></div>
+                    ${c.error ? `<div style="color:var(--danger);"><strong>Error:</strong> ${escape(c.error)}</div>` : ''}
+                </div>`;
+        }).join('');
+
+        const raw = `
+            <details style="margin-top:0.5rem;">
+                <summary style="cursor:pointer;font-family:var(--font-sans,sans-serif);font-size:0.8rem;color:var(--text-muted);">Show raw PEM</summary>
+                <pre style="white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.75rem;margin-top:0.5rem;font-size:0.72rem;max-height:260px;overflow:auto;">${escape(rawPem)}</pre>
+            </details>`;
+
+        return header + (cards || '<div style="color:var(--text-muted);">No certificate parsed.</div>') + raw;
     },
 
     _closeCertRequestLogOverlay() {
