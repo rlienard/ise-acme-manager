@@ -299,7 +299,7 @@ class CertificateRequestRunner:
         portal_group_tag: str,
         certificate_mode: str = "shared",
         phase: str = "all",
-    ) -> None:
+    ) -> "list[dict]":
         """Import an already-obtained certificate into all target ISE nodes.
 
         This is the second half of the split flow.  It receives the
@@ -321,6 +321,11 @@ class CertificateRequestRunner:
                   to have already been imported in a previous
                   ``"ca_chain"`` call) and run the leaf import, portal
                   bind, and secondary distribution.
+
+        Returns:
+            A list of dicts describing CA certificates that were skipped
+            due to ISE bug CSCwq85152 (apostrophe in subject field).
+            Empty when all certificates were imported successfully.
         """
         if phase not in ("all", "ca_chain", "leaf"):
             raise CertificateRequestError(
@@ -346,18 +351,25 @@ class CertificateRequestRunner:
                 "certificate store",
                 phase="trusted_import",
             )
-            ise.import_certificate(
+            result = ise.import_certificate(
                 {"certData": cert_pem, "privateKeyData": key_pem},
                 primary.name,
                 portal_group_tag,
                 import_ca_chain=True,
                 import_leaf=False,
             )
+            skipped = result.get("skipped_certs", [])
+            if skipped:
+                for sc in skipped:
+                    self.warning(
+                        f"Certificate '{sc['name']}' skipped — {sc['reason']}",
+                        phase="trusted_import",
+                    )
             self.success(
                 "CA chain uploaded to ISE trusted certificate store",
                 phase="trusted_import",
             )
-            return
+            return skipped
 
         # ── Phase: leaf-only (and 'all') ────────────────────────
         # For "leaf" we skip the CA chain upload (assumed to have been
@@ -432,6 +444,7 @@ class CertificateRequestRunner:
             phase="done",
             data={"common_name": common_name, "certificate_id": cert_id},
         )
+        return []
 
     # ── DNS client builder (shared by run() and run_acme_phase()) ──
 

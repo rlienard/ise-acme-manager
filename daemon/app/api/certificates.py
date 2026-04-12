@@ -322,7 +322,7 @@ def push_certificate_to_ise(payload: CertificateIsePushPayload):
             # run_ise_push() receives all necessary data as explicit args
             # and never reads self.payload.
             runner = CertificateRequestRunner(db, None, emit)
-            runner.run_ise_push(
+            skipped_certs = runner.run_ise_push(
                 cert_pem=payload.cert_pem,
                 key_pem=payload.key_pem,
                 common_name=payload.common_name,
@@ -330,21 +330,24 @@ def push_certificate_to_ise(payload: CertificateIsePushPayload):
                 portal_group_tag=payload.portal_group_tag,
                 certificate_mode=payload.certificate_mode,
                 phase=payload.phase,
-            )
+            ) or []
             phase_messages = {
                 "ca_chain": "CA chain uploaded to ISE trusted certificate store",
                 "leaf": "Leaf certificate imported and bound on ISE",
                 "all": "Certificate pushed to ISE successfully",
             }
+            complete_data = {
+                "success": True,
+                "message": phase_messages.get(
+                    payload.phase, "Certificate pushed to ISE successfully"
+                ),
+                "phase": payload.phase,
+            }
+            if skipped_certs:
+                complete_data["skipped_certs"] = skipped_certs
             events.put({
                 "event": "complete",
-                "data": {
-                    "success": True,
-                    "message": phase_messages.get(
-                        payload.phase, "Certificate pushed to ISE successfully"
-                    ),
-                    "phase": payload.phase,
-                },
+                "data": complete_data,
             })
         except CertificateRequestError as e:
             logger.warning(f"ISE push failed: {e}")

@@ -2413,7 +2413,15 @@ const Settings = {
                                 status.className = 'cert-log-status success';
                                 status.innerHTML = '<i class="fas fa-check-circle"></i><span>CA chain uploaded</span>';
                             }
-                            onPhaseSuccess();
+                            // If any CA certs were skipped due to ISE bug
+                            // CSCwq85152, show a manual import modal before
+                            // proceeding to the leaf phase.
+                            const skipped = (evt && evt.skipped_certs) || [];
+                            if (skipped.length > 0) {
+                                this._showManualImportModal(skipped, onPhaseSuccess);
+                            } else {
+                                onPhaseSuccess();
+                            }
                         } else {
                             // Terminal phase: finalize the overlay.
                             if (pushBtn) pushBtn.style.display = 'none';
@@ -2538,6 +2546,132 @@ const Settings = {
             </details>`;
 
         return header + (cards || '<div style="color:var(--text-muted);">No certificate parsed.</div>') + raw;
+    },
+
+    // ── Manual import modal (ISE bug CSCwq85152) ─────────────
+
+    _showManualImportModal(skippedCerts, onContinue) {
+        let overlay = document.getElementById('cert-manual-import-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'cert-manual-import-overlay';
+            overlay.className = 'cert-log-overlay';
+            overlay.innerHTML = `
+                <div class="cert-log-modal">
+                    <div class="cert-log-header">
+                        <h3>
+                            <i class="fas fa-exclamation-triangle" style="color:var(--warning,#f0ad4e);"></i>
+                            <span>Manual Import Required</span>
+                        </h3>
+                        <div class="cert-log-status running" style="background:rgba(240,173,78,0.12);color:var(--warning,#f0ad4e);">
+                            <i class="fas fa-hand-paper"></i>
+                            <span>Action needed</span>
+                        </div>
+                    </div>
+                    <div class="cert-log-body" id="cert-manual-import-body"></div>
+                    <div class="cert-log-footer">
+                        <button class="btn btn-outline btn-sm" id="cert-manual-import-cancel-btn">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                        <button class="btn btn-primary btn-sm" id="cert-manual-import-continue-btn" style="margin-left:0.5rem;">
+                            <i class="fas fa-check"></i> I've imported the certificate(s) — Continue
+                        </button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+        }
+
+        const body = overlay.querySelector('#cert-manual-import-body');
+        const cancelBtn = overlay.querySelector('#cert-manual-import-cancel-btn');
+        const continueBtn = overlay.querySelector('#cert-manual-import-continue-btn');
+        const escape = (s) => this._escape(String(s == null ? '' : s));
+
+        // Build body HTML
+        let html = `
+            <div style="font-family:var(--font-sans,sans-serif);font-size:0.85rem;color:var(--text);margin-bottom:0.75rem;">
+                <p style="margin:0 0 0.75rem 0;">
+                    The following certificate(s) could not be imported automatically due to a
+                    <strong>known Cisco ISE bug</strong>
+                    (<a href="https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwq85152"
+                        target="_blank" rel="noopener"
+                        style="color:var(--primary);">CSCwq85152</a>).
+                    ISE rejects certificates whose subject field contains an apostrophe (<code>'</code>)
+                    via the API.
+                </p>
+                <p style="margin:0 0 0.75rem 0;">
+                    Please <strong>download</strong> each certificate below and import it manually into
+                    ISE via <strong>Administration &gt; System &gt; Certificates &gt; Trusted Certificates &gt; Import</strong>.
+                    Once done, click <em>"I've imported the certificate(s) — Continue"</em> to proceed
+                    with importing the leaf certificate.
+                </p>
+            </div>`;
+
+        skippedCerts.forEach((cert, i) => {
+            const downloadId = `cert-manual-download-${i}`;
+            html += `
+                <div style="border:1px solid var(--border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem;background:var(--card-bg);font-family:var(--font-sans,sans-serif);font-size:0.8rem;line-height:1.55;">
+                    <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+                        <strong style="color:var(--warning,#f0ad4e);">
+                            <i class="fas fa-certificate"></i>
+                            ${escape(cert.name || 'Certificate')}
+                        </strong>
+                    </div>
+                    <div><strong>Subject:</strong> ${escape(cert.subject || '')}</div>
+                    <div style="margin-top:0.5rem;color:var(--text-muted);font-size:0.78rem;">
+                        ${escape(cert.reason || '')}
+                    </div>
+                    <div style="margin-top:0.75rem;">
+                        <button class="btn btn-outline btn-sm" id="${downloadId}">
+                            <i class="fas fa-download"></i> Download PEM
+                        </button>
+                    </div>
+                </div>`;
+        });
+
+        if (body) body.innerHTML = html;
+
+        // Wire download buttons after DOM insertion
+        skippedCerts.forEach((cert, i) => {
+            const btn = document.getElementById(`cert-manual-download-${i}`);
+            if (btn) {
+                btn.onclick = () => {
+                    const filename = (cert.name || 'certificate').replace(/[^a-zA-Z0-9._-]/g, '_') + '.pem';
+                    this._downloadPemFile(cert.pem, filename);
+                };
+            }
+        });
+
+        // Wire action buttons
+        if (cancelBtn) {
+            cancelBtn.onclick = () => {
+                overlay.style.display = 'none';
+                const pushBtn = document.getElementById('cert-log-push-ise-btn');
+                if (pushBtn) {
+                    pushBtn.disabled = false;
+                    pushBtn.innerHTML = '<i class="fas fa-upload"></i> Push to Cisco ISE';
+                }
+            };
+        }
+        if (continueBtn) {
+            continueBtn.onclick = () => {
+                overlay.style.display = 'none';
+                if (typeof onContinue === 'function') onContinue();
+            };
+        }
+
+        overlay.style.display = 'flex';
+    },
+
+    _downloadPemFile(pem, filename) {
+        const blob = new Blob([pem], { type: 'application/x-pem-file' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     },
 
     _closeCertRequestLogOverlay() {

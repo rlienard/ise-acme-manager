@@ -98,6 +98,23 @@ def _normalize_pem_for_ise(pem: str) -> str:
     return text
 
 
+def _has_apostrophe_in_subject(cert_obj: x509.Certificate) -> bool:
+    """Return True if any attribute in the certificate's Subject contains ``'``.
+
+    Cisco ISE bug CSCwq85152 prevents certificates whose subject field
+    contains an apostrophe from being imported via the Open API.  The
+    Let's Encrypt intermediate (e.g. R3) has ``O=Let's Encrypt``, which
+    triggers this bug.
+    """
+    for attr in cert_obj.subject:
+        try:
+            if "'" in str(attr.value):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _get_aki(cert_obj: x509.Certificate) -> "bytes | None":
     """Extract the Authority Key Identifier (key_identifier bytes), or *None*."""
     try:
@@ -692,11 +709,18 @@ class ISEClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"POST {post_url} failed: {e}") from e
 
-    def _ensure_intermediates_trusted(self, pem_chain: str) -> None:
+    def _ensure_intermediates_trusted(self, pem_chain: str) -> "list[dict]":
         """Upload intermediate and root CA certificates to ISE's trusted store.
 
         ISE must already trust every certificate in the chain above the
         leaf in order for ``system-certificate/import`` to succeed.
+
+        **Apostrophe bug (CSCwq85152).**  Cisco ISE rejects certificates
+        whose subject contains an apostrophe (``'``) via the API.  The
+        Let's Encrypt intermediate (e.g. R3, ``O=Let's Encrypt``)
+        triggers this.  Such certificates are **skipped** and returned
+        in the ``skipped`` list so the caller can prompt the operator
+        for manual import.
 
         **One certificate per API call.**  Cisco ISE's
         ``/certs/trusted-certificate/import`` endpoint explicitly accepts
@@ -727,12 +751,19 @@ class ISEClient:
         is uploaded.
 
         HTTP 409 (certificate already exists) is silently ignored.
+
+        Returns:
+            A list of dicts describing certificates that were skipped
+            due to ISE bug CSCwq85152.  Each dict contains ``name``,
+            ``subject``, ``pem``, and ``reason`` keys.  An empty list
+            means every certificate was imported successfully.
         """
         components = split_certificate_chain(pem_chain)
+        skipped: "list[dict]" = []
 
         if not components["ca_chain"].strip():
             # No intermediates or root — nothing to upload.
-            return
+            return skipped
 
         # Build an ordered list of individual CA PEM blocks.
         # _split_pem_chain yields the ordered list
@@ -810,6 +841,39 @@ class ISEClient:
             # Normalize the PEM to the exact format ISE expects:
             # no CR, no blank lines, single LF terminator.
             normalized_pem = _normalize_pem_for_ise(pem_block)
+
+            # ── Apostrophe bug (CSCwq85152) ────────────────────────
+            # Cisco ISE rejects trusted-certificate imports when the
+            # certificate's subject contains an apostrophe.  Let's
+            # Encrypt intermediate certs (O=Let's Encrypt) trigger this.
+            # Skip the API call and report the cert for manual import.
+            if cert_obj and _has_apostrophe_in_subject(cert_obj):
+                try:
+                    subj_str = cert_obj.subject.rfc4514_string()
+                except Exception:
+                    subj_str = str(cert_obj.subject)
+                logger.warning(
+                    "CA [%d/%d] '%s' has an apostrophe in its subject "
+                    "(%s) — skipping API import due to Cisco ISE bug "
+                    "CSCwq85152. This certificate must be imported "
+                    "manually into ISE's Trusted Certificate Store.",
+                    idx + 1, total, friendly, subj_str,
+                )
+                skipped.append({
+                    "name": friendly,
+                    "subject": subj_str,
+                    "pem": normalized_pem,
+                    "reason": (
+                        "This certificate contains an apostrophe (') in "
+                        "its subject field (e.g. O=Let's Encrypt). A "
+                        "known Cisco ISE bug (CSCwq85152) prevents "
+                        "importing such certificates via the API. "
+                        "Please download this certificate and import it "
+                        "manually into ISE's Administration > System > "
+                        "Certificates > Trusted Certificates store."
+                    ),
+                })
+                continue
 
             # Diagnostic: log the byte-level content of what we're about
             # to POST, so the operator can verify formatting issues by
@@ -914,6 +978,8 @@ class ISEClient:
                         + hint
                     ) from exc
 
+        return skipped
+
     def import_certificate(
         self,
         cert_data: dict,
@@ -977,12 +1043,13 @@ class ISEClient:
         # requires the intermediates to be present in its trusted store.
         # We therefore upload intermediates first, then import the leaf.
         raw_cert = cert_data.get("certData") or cert_data.get("data") or ""
+        skipped_certs: "list[dict]" = []
         if raw_cert and import_ca_chain:
-            self._ensure_intermediates_trusted(raw_cert)
+            skipped_certs = self._ensure_intermediates_trusted(raw_cert)
 
         if not import_leaf:
             # Caller asked for CA chain only — stop here.
-            return {}
+            return {"skipped_certs": skipped_certs}
 
         if raw_cert:
             blocks = _split_pem_chain(raw_cert)
